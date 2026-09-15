@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Discord;
@@ -77,15 +79,28 @@ namespace DiscordTelegramFrontier
 
             var guild = guildId != 0 ? _discord.GetGuild(guildId) : null;
 
-            IGuildUser user = null;
+            SocketGuildUser user = null;
             if (guild is not null && msg.From is { } from && _opts.UserToDiscord.TryGetValue(from.Id, out var discordId))
                 user = guild.GetUser(discordId);
 
             var channel = new FrontierProxyChannel(bot, msg.Chat.Id);
-            var context = new FrontierCommandContext(_discord, guild, channel, user, new FrontierProxyMessage(channel, text, user));
+            var context = (SocketCommandContext)RuntimeHelpers.GetUninitializedObject(typeof(SocketCommandContext));
+            SetField(context, "Client", _discord);
+            SetField(context, "Guild", guild);
+            SetField(context, "Channel", channel);
+            SetField(context, "User", user);
+            SetField(context, "Message", null);
+
             await _commands.ExecuteAsync(context, text, _services);
         }
 
         private Task HandleErrorAsync(ITelegramBotClient bot, Exception ex, CancellationToken ct) => Task.CompletedTask;
+
+        private static void SetField(object target, string propertyName, object value)
+        {
+            var field = typeof(SocketCommandContext)
+                .GetField($"<{propertyName}>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic);
+            field?.SetValue(target, value);
+        }
     }
 }
