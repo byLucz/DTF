@@ -73,21 +73,13 @@ namespace DiscordTelegramFrontier
                 return;
 
             if (!_opts.ChatToGuild.TryGetValue(msg.Chat.Id, out var guildId))
-                return;
+                guildId = _opts.DefaultGuildId;
 
-            var guild = _discord.GetGuild(guildId);
-            if (guild is null)
-                return;
+            var guild = guildId != 0 ? _discord.GetGuild(guildId) : null;
 
             IGuildUser user = null;
-            if (msg.From is { } from && _opts.UserToDiscord.TryGetValue(from.Id, out var discordId))
+            if (guild is not null && msg.From is { } from && _opts.UserToDiscord.TryGetValue(from.Id, out var discordId))
                 user = guild.GetUser(discordId);
-
-            if (user is null)
-            {
-                await bot.SendMessage(msg.Chat.Id, "Account is not linked to Discord.", cancellationToken: ct);
-                return;
-            }
 
             var channel = new FrontierProxyChannel(bot, msg.Chat.Id);
             var context = new FrontierCommandContext(_discord, guild, channel, user, new FrontierProxyMessage(channel, text, user));

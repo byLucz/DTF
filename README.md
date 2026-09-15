@@ -36,7 +36,7 @@ public async Task Weather(params string[] city) { ... await ReplyAsync(embed: e.
 
 - Only text/data commands that reply via `ReplyAsync` / `Context.Channel.SendMessageAsync` are portable.
 - Not supported: voice/music, reactions, interactive-button callbacks, commands that cast the channel to `SocketTextChannel`.
-- `Context.Guild` / `Context.User` are taken live from Discord (mapped from config), so a command requires the Telegram user to be linked to a Discord id.
+- Mappings are optional. Stateless commands (e.g. an API lookup) work in any chat with no mapping. Commands that read `Context.Guild` need a chat→guild map (or `DefaultGuild`); commands with permission checks (`Context.User`) need the Telegram user linked to a Discord id — otherwise `Guild`/`User` are null and such commands degrade or deny.
 
 ## Stack
 

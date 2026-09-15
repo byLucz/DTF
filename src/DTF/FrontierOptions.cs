@@ -5,9 +5,16 @@ namespace DiscordTelegramFrontier
     public sealed class FrontierOptions
     {
         public string TelegramToken { get; set; }
+        public ulong DefaultGuildId { get; set; }
 
         public Dictionary<long, ulong> ChatToGuild { get; } = new();
         public Dictionary<long, ulong> UserToDiscord { get; } = new();
+
+        public FrontierOptions DefaultGuild(ulong guildId)
+        {
+            DefaultGuildId = guildId;
+            return this;
+        }
 
         public FrontierOptions Chat(long chatId, ulong guildId)
         {
