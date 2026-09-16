@@ -1,14 +1,13 @@
-﻿# DiscordTelegramFrontier (DTF)
+﻿# DTF
 
-Reuses existing Discord.Net prefix commands in Telegram. Keep
-`ModuleBase<SocketCommandContext>` and mark portable commands with `[Frontier]`.
+DiscordTelegramFrontier (DTF) - enables Discord.Net commands to be reused and executed through Telegram.Bot.
 
 ## How it works
 
-DTF runs a Telegram client (long-polling) in the same process as the Discord bot. On an incoming Telegram command it builds a proxy `ICommandContext` (real `Client` + `Guild`, a proxy channel) and calls `CommandService.ExecuteAsync` — the exact same command logic. The command's output (`ReplyAsync` / `Context.Channel.SendMessageAsync`) is intercepted by the proxy channel and rendered to Telegram (Embed → HTML text + photo).
+DTF builds a proxy context with real Discord client/guild/user objects, resolves and validates the command through Discord.Net, then executes its existing logic. The proxy channel renders replies for Telegram.
 
 ```
-TG update → FrontierService → proxy ICommandContext → CommandService.ExecuteAsync
+TG update → FrontierService → command resolution → CommandInfo.ExecuteAsync
           → command calls ReplyAsync(embed) → FrontierProxyChannel → Telegram.Bot.SendMessage
 ```
 
@@ -25,6 +24,8 @@ services.AddFrontier(o =>
 
 await provider.GetRequiredService<FrontierService>().StartAsync();
 ```
+
+`[Frontier]` sends text; `[FrontierAsImage]` sends PNG with cached Discord emoji and works on its own. `ModifyAsync` updates the same message. Image mode uses static emoji frames and renders embed images as links; Linux needs fontconfig and suitable fonts.
 
 Mark a command:
 ```csharp

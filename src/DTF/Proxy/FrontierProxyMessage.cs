@@ -11,13 +11,13 @@ namespace DiscordTelegramFrontier
         private readonly FrontierProxyChannel _channel;
         private string _content;
         private Embed[] _embeds;
-        private (string text, string image) _rendered;
+        private TelegramRenderedMessage _rendered;
         private readonly IUser _author;
         private readonly SemaphoreSlim _gate = new(1, 1);
         private bool _deleted;
 
         internal FrontierProxyMessage(FrontierProxyChannel channel, int telegramMessageId, string content,
-            Embed[] embeds, IUser author, (string text, string image) rendered)
+            Embed[] embeds, IUser author, TelegramRenderedMessage rendered)
         {
             _channel = channel;
             _content = content ?? "";
@@ -89,7 +89,7 @@ namespace DiscordTelegramFrontier
                 var embeds = properties.Embed.IsSpecified || properties.Embeds.IsSpecified
                     ? TelegramRenderer.CombineEmbeds(properties.Embed.GetValueOrDefault(), properties.Embeds.GetValueOrDefault())
                     : _embeds;
-                var rendered = TelegramRenderer.RenderMessage(content, embeds);
+                var rendered = await _channel.RenderAsync(content, embeds, ct).ConfigureAwait(false);
                 var messageId = await _channel.EditAsync(TelegramMessageId, _rendered, rendered, ct).ConfigureAwait(false);
 
                 TelegramMessageId = messageId;

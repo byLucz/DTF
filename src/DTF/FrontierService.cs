@@ -142,10 +142,24 @@ namespace DiscordTelegramFrontier
             var matches = _commands.Search(context, text);
             if (!matches.IsSuccess || matches.Commands.Count == 0)
                 return;
-            if (matches.Commands.Any(match => !match.Command.Attributes.Any(a => a is FrontierAttribute)))
+            if (matches.Commands.Any(match => !match.Command.Attributes.Any(a => a is FrontierAttribute or FrontierAsImageAttribute)))
                 return;
 
-            var result = await _commands.ExecuteAsync(context, text, _services).ConfigureAwait(false);
+            var validation = await _commands.ValidateAndGetBestMatch(matches, context, _services).ConfigureAwait(false);
+            if (validation is not MatchResult selection || !selection.IsSuccess || !selection.Match.HasValue)
+            {
+                await ReportFailureAsync(context, validation).ConfigureAwait(false);
+                return;
+            }
+            if (selection.Pipeline is not ParseResult parsed || !parsed.IsSuccess)
+            {
+                await ReportFailureAsync(context, selection.Pipeline).ConfigureAwait(false);
+                return;
+            }
+
+            var command = selection.Match.Value.Command;
+            channel.SetRenderMode(command.Attributes.Any(a => a is FrontierAsImageAttribute));
+            var result = await command.ExecuteAsync(context, parsed, _services).ConfigureAwait(false);
             await ReportFailureAsync(context, result).ConfigureAwait(false);
         }
 

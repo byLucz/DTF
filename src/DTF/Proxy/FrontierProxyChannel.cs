@@ -19,38 +19,57 @@ namespace DiscordTelegramFrontier
         private readonly ITelegramBotClient _tg;
         private readonly long _chatId;
         private readonly IUser _author;
+        private bool _renderAsImage;
+        private static readonly TelegramImageRenderer ImageRenderer = new();
         private readonly ConcurrentDictionary<ulong, FrontierProxyMessage> _messages = new();
 
-        public FrontierProxyChannel(ITelegramBotClient tg, long chatId, IUser author = null)
+        public FrontierProxyChannel(ITelegramBotClient tg, long chatId, IUser author = null, bool renderAsImage = false)
         {
             _tg = tg ?? throw new ArgumentNullException(nameof(tg));
             _chatId = chatId;
             _author = author;
+            _renderAsImage = renderAsImage;
         }
 
         private async Task<FrontierProxyMessage> SendCoreAsync(string text, Embed embed, Embed[] embeds, RequestOptions options)
         {
             var allEmbeds = TelegramRenderer.CombineEmbeds(embed, embeds);
-            var rendered = TelegramRenderer.RenderMessage(text, allEmbeds);
-            var sent = await SendRenderedAsync(rendered, options?.CancelToken ?? default).ConfigureAwait(false);
+            var ct = options?.CancelToken ?? default;
+            var rendered = await RenderAsync(text, allEmbeds, ct).ConfigureAwait(false);
+            var sent = await SendRenderedAsync(rendered, ct).ConfigureAwait(false);
             var message = new FrontierProxyMessage(this, sent.Id, text, allEmbeds, _author, rendered);
             _messages[message.Id] = message;
             return message;
         }
 
-        private Task<Message> SendRenderedAsync((string text, string image) rendered, CancellationToken ct)
-            => rendered.image == null
-                ? _tg.SendMessage(_chatId, rendered.text, parseMode: ParseMode.Html, cancellationToken: ct)
-                : _tg.SendPhoto(_chatId, InputFile.FromUri(rendered.image), caption: rendered.text,
-                    parseMode: ParseMode.Html, cancellationToken: ct);
-
-        internal async Task<int> EditAsync(int messageId, (string text, string image) previous,
-            (string text, string image) next, CancellationToken ct)
+        internal async Task<TelegramRenderedMessage> RenderAsync(string content, Embed[] embeds, CancellationToken ct)
         {
-            if (previous == next)
+            if (_renderAsImage)
+                return new TelegramRenderedMessage(null, Png: await ImageRenderer.RenderAsync(content, embeds, ct).ConfigureAwait(false));
+            var rendered = TelegramRenderer.RenderMessage(content, embeds);
+            return new TelegramRenderedMessage(rendered.text, rendered.image);
+        }
+
+        private async Task<Message> SendRenderedAsync(TelegramRenderedMessage rendered, CancellationToken ct)
+        {
+            if (rendered.Png != null)
+            {
+                using var stream = new MemoryStream(rendered.Png, false);
+                return await _tg.SendPhoto(_chatId, InputFile.FromStream(stream, "message.png"), cancellationToken: ct).ConfigureAwait(false);
+            }
+            return rendered.ImageUrl == null
+                ? await _tg.SendMessage(_chatId, rendered.Text, parseMode: ParseMode.Html, cancellationToken: ct).ConfigureAwait(false)
+                : await _tg.SendPhoto(_chatId, InputFile.FromUri(rendered.ImageUrl), caption: rendered.Text,
+                    parseMode: ParseMode.Html, cancellationToken: ct).ConfigureAwait(false);
+        }
+
+        internal async Task<int> EditAsync(int messageId, TelegramRenderedMessage previous,
+            TelegramRenderedMessage next, CancellationToken ct)
+        {
+            if (previous.HasSameContent(next))
                 return messageId;
 
-            if (previous.image != null && next.image == null)
+            if (previous.IsPhoto && !next.IsPhoto)
             {
                 var replacement = await SendRenderedAsync(next, ct).ConfigureAwait(false);
                 try
@@ -75,16 +94,22 @@ namespace DiscordTelegramFrontier
 
             try
             {
-                if (next.image == null)
-                    await _tg.EditMessageText(_chatId, messageId, next.text, parseMode: ParseMode.Html,
+                if (next.Png != null)
+                {
+                    using var stream = new MemoryStream(next.Png, false);
+                    await _tg.EditMessageMedia(_chatId, messageId,
+                        new InputMediaPhoto(InputFile.FromStream(stream, "message.png")), cancellationToken: ct).ConfigureAwait(false);
+                }
+                else if (next.ImageUrl == null)
+                    await _tg.EditMessageText(_chatId, messageId, next.Text, parseMode: ParseMode.Html,
                         cancellationToken: ct).ConfigureAwait(false);
-                else if (previous.image == next.image)
-                    await _tg.EditMessageCaption(_chatId, messageId, caption: next.text, parseMode: ParseMode.Html,
+                else if (previous.ImageUrl == next.ImageUrl && previous.Png == null)
+                    await _tg.EditMessageCaption(_chatId, messageId, caption: next.Text, parseMode: ParseMode.Html,
                         cancellationToken: ct).ConfigureAwait(false);
                 else
-                    await _tg.EditMessageMedia(_chatId, messageId, new InputMediaPhoto(InputFile.FromUri(next.image))
+                    await _tg.EditMessageMedia(_chatId, messageId, new InputMediaPhoto(InputFile.FromUri(next.ImageUrl))
                     {
-                        Caption = next.text,
+                        Caption = next.Text,
                         ParseMode = ParseMode.Html
                     }, cancellationToken: ct).ConfigureAwait(false);
             }
@@ -100,6 +125,7 @@ namespace DiscordTelegramFrontier
 
         internal void Forget(ulong id) => _messages.TryRemove(id, out _);
         internal bool UsesClient(ITelegramBotClient client) => ReferenceEquals(_tg, client);
+        internal void SetRenderMode(bool renderAsImage) => _renderAsImage = renderAsImage;
 
         public ulong Id => unchecked((ulong)_chatId);
         public string Name => "telegram";
