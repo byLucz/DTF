@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Text;
@@ -20,45 +21,105 @@ namespace DiscordTelegramFrontier
         {
             var image = embeds.Select(e => e.Image?.Url ?? e.Thumbnail?.Url)
                 .FirstOrDefault(url => !string.IsNullOrEmpty(url));
-            var remaining = image == null ? 4096 : 1024;
-            var sb = new StringBuilder();
-
-            void Append(string value, string tag = null)
+            var blocks = new List<TextBlock>();
+            void Append(string value, TextStyle style = TextStyle.None, string url = null)
             {
-                if (string.IsNullOrWhiteSpace(value) || remaining == 0)
-                    return;
-                if (sb.Length != 0)
+                if (string.IsNullOrWhiteSpace(value)) return;
+                blocks.AddRange(DiscordMarkdown.Parse(value).Select(block => block with
                 {
-                    sb.Append('\n');
-                    remaining--;
-                }
-                if (remaining == 0)
-                    return;
-                if (value.Length > remaining)
-                {
-                    var length = remaining - 1;
-                    if (length > 0 && char.IsHighSurrogate(value[length - 1]))
-                        length--;
-                    value = value.Substring(0, length) + "…";
-                }
-                remaining -= value.Length;
-                if (tag != null) sb.Append('<').Append(tag).Append('>');
-                sb.Append(WebUtility.HtmlEncode(value));
-                if (tag != null) sb.Append("</").Append(tag).Append('>');
+                    Runs = block.Runs.Select(run => run with
+                    {
+                        Style = run.Style | style,
+                        Url = run.Url ?? (DiscordMarkdown.IsLink(url) ? url : null)
+                    }).ToArray()
+                }));
             }
 
             Append(message);
             foreach (var embed in embeds)
             {
-                Append(embed.Author?.Name, "b");
-                Append(embed.Title, "b");
+                Append(embed.Author?.Name, TextStyle.Bold, embed.Author?.Url);
+                Append(embed.Title, TextStyle.Bold, embed.Url);
                 Append(embed.Description);
                 foreach (var field in embed.Fields)
-                    Append(field.Name + ": " + field.Value);
-                Append(embed.Footer?.Text, "i");
+                {
+                    Append(field.Name, TextStyle.Bold);
+                    Append(field.Value);
+                }
+                Append(embed.Footer?.Text, TextStyle.Italic);
             }
 
-            return (sb.Length == 0 && image == null ? "(empty)" : sb.ToString(), image);
+            var html = RenderHtml(blocks, image == null ? 4096 : 1024);
+            return (html.Length == 0 && image == null ? "(empty)" : html, image);
+        }
+
+        private static string RenderHtml(IReadOnlyList<TextBlock> blocks, int limit)
+        {
+            var length = blocks.Sum(block => block.Runs.Sum(run => run.Text.Length)) + Math.Max(0, blocks.Count - 1);
+            var truncated = length > limit;
+            var remaining = truncated ? limit - 1 : limit;
+            var html = new StringBuilder();
+            for (var i = 0; i < blocks.Count && remaining > 0; i++)
+            {
+                if (i > 0) { html.Append('\n'); remaining--; }
+                var block = blocks[i];
+                var quoting = false;
+                foreach (var run in block.Runs)
+                {
+                    var text = Take(run.Text, remaining);
+                    if (text.Length == 0)
+                    {
+                        if (run.Text.Length != 0) { remaining = 0; break; }
+                        continue;
+                    }
+                    remaining -= text.Length;
+                    var style = run.Style | (block.Heading > 0 ? TextStyle.Bold : TextStyle.None)
+                        | (block.Small ? TextStyle.Italic : TextStyle.None);
+                    var code = (style & (TextStyle.Code | TextStyle.Pre)) != 0 && !style.HasFlag(TextStyle.Spoiler);
+                    var quote = block.Quote && !code && run.Url == null;
+                    if (quoting && !quote) html.Append("</blockquote>");
+                    if (!quoting && quote) html.Append("<blockquote>");
+                    quoting = quote;
+                    var encoded = WebUtility.HtmlEncode(text);
+                    if (code)
+                    {
+                        if (style.HasFlag(TextStyle.Pre))
+                        {
+                            encoded = run.Language == null ? "<pre>" + encoded + "</pre>"
+                                : "<pre><code class=\"language-" + WebUtility.HtmlEncode(run.Language) + "\">" + encoded + "</code></pre>";
+                        }
+                        else encoded = "<code>" + encoded + "</code>";
+                    }
+                    else
+                    {
+                        if (style.HasFlag(TextStyle.Bold)) encoded = "<b>" + encoded + "</b>";
+                        if (style.HasFlag(TextStyle.Italic)) encoded = "<i>" + encoded + "</i>";
+                        if (style.HasFlag(TextStyle.Underline)) encoded = "<u>" + encoded + "</u>";
+                        if (style.HasFlag(TextStyle.Strike)) encoded = "<s>" + encoded + "</s>";
+                        if (style.HasFlag(TextStyle.Spoiler)) encoded = "<tg-spoiler>" + encoded + "</tg-spoiler>";
+                        if (run.Url != null) encoded = "<a href=\"" + WebUtility.HtmlEncode(run.Url) + "\">" + encoded + "</a>";
+                    }
+                    html.Append(encoded);
+                    if (text.Length < run.Text.Length) { remaining = 0; break; }
+                }
+                if (quoting) html.Append("</blockquote>");
+            }
+            if (truncated) html.Append('…');
+            return html.ToString();
+        }
+
+        private static string Take(string text, int limit)
+        {
+            if (text.Length <= limit) return text;
+            var length = 0;
+            var elements = StringInfo.GetTextElementEnumerator(text);
+            while (elements.MoveNext())
+            {
+                var next = elements.ElementIndex + elements.GetTextElement().Length;
+                if (next > limit) break;
+                length = next;
+            }
+            return text.Substring(0, length);
         }
     }
 }

@@ -22,21 +22,20 @@ namespace DiscordTelegramFrontier
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
         private static readonly ConcurrentDictionary<string, CachedEmoji> EmojiCache = new();
         private static readonly SemaphoreSlim Downloads = new(4, 4);
-        private static readonly Regex EmojiPattern = new(@"<a?:(?<name>[A-Za-z0-9_]+):(?<id>[0-9]+)>", RegexOptions.Compiled);
         private static readonly Regex Words = new(@"\r\n|\r|\n|[^\S\r\n]+|[^\s]+", RegexOptions.Compiled);
 
         public async Task<byte[]> RenderAsync(string content, IReadOnlyList<Embed> embeds = null, CancellationToken cancellationToken = default)
         {
             embeds ??= Array.Empty<Embed>();
             var blocks = new List<Block>();
-            if (!string.IsNullOrWhiteSpace(content)) blocks.Add(new Block(content, 30, SKColors.White));
+            Add(content, 30, SKColors.White);
             foreach (var embed in embeds)
             {
                 if (embed == null) continue;
                 var accent = embed.Color is { } color ? new SKColor(color.R, color.G, color.B) : new SKColor(91, 160, 238);
                 blocks.Add(new Block(null, 0, accent));
-                Add(embed.Author?.Name, 23, new SKColor(174, 188, 204));
-                Add(embed.Title, 36, SKColors.White, true);
+                Add(embed.Author?.Name, 23, new SKColor(174, 188, 204), url: embed.Author?.Url);
+                Add(embed.Title, 36, SKColors.White, true, embed.Url);
                 Add(embed.Description, 30, new SKColor(231, 237, 244));
                 foreach (var field in embed.Fields)
                 {
@@ -47,14 +46,11 @@ namespace DiscordTelegramFrontier
                 else if (embed.Thumbnail?.Url is { } thumbnailUrl) Add(thumbnailUrl, 20, new SKColor(130, 177, 228));
                 Add(embed.Footer?.Text, 22, new SKColor(151, 168, 185));
 
-                void Add(string text, float size, SKColor foreground, bool bold = false)
-                {
-                    if (!string.IsNullOrWhiteSpace(text)) blocks.Add(new Block(text, size, foreground, bold));
-                }
             }
-            if (!blocks.Any(b => b.Text != null)) blocks.Add(new Block("(empty)", 30, SKColors.White));
-            var ids = blocks.Where(b => b.Text != null).SelectMany(b => EmojiPattern.Matches(b.Text).Cast<Match>())
-                .Select(m => m.Groups["id"].Value).Distinct().Take(100).ToArray();
+            if (!blocks.Any(b => b.Content != null)) Add("(empty)", 30, SKColors.White);
+            var ids = blocks.Where(b => b.Content != null).SelectMany(b => b.Content.Runs)
+                .Where(run => run.EmojiId != null && !run.Style.HasFlag(TextStyle.Spoiler))
+                .Select(run => run.EmojiId).Distinct().Take(100).ToArray();
             var assets = await Task.WhenAll(ids.Select(id => DownloadEmojiAsync(id, cancellationToken))).ConfigureAwait(false);
             var images = new Dictionary<string, SKBitmap>();
             try
@@ -75,7 +71,7 @@ namespace DiscordTelegramFrontier
                 foreach (var block in blocks)
                 {
                     if (y > MaxHeight - 120) break;
-                    if (block.Text == null)
+                    if (block.Content == null)
                     {
                         if (y > Padding) y += 16;
                         using var rule = new SKPaint { Color = block.Color, IsAntialias = true };
@@ -105,86 +101,135 @@ namespace DiscordTelegramFrontier
             {
                 foreach (var bitmap in images.Values) bitmap.Dispose();
             }
+
+            void Add(string text, float size, SKColor foreground, bool bold = false, string url = null)
+            {
+                if (string.IsNullOrWhiteSpace(text)) return;
+                foreach (var parsed in DiscordMarkdown.Parse(text))
+                {
+                    var content = parsed with
+                    {
+                        Runs = parsed.Runs.Select(run => run with
+                        {
+                            Url = run.Url ?? (DiscordMarkdown.IsLink(url) ? url : null)
+                        }).ToArray()
+                    };
+                    var scale = parsed.Heading switch { 1 => 1.5f, 2 => 1.3f, 3 => 1.15f, _ => parsed.Small ? 0.8f : 1 };
+                    blocks.Add(new Block(content, size * scale, parsed.Small ? new SKColor(151, 168, 185) : foreground,
+                        bold || parsed.Heading > 0));
+                }
+            }
         }
 
         private static float DrawBlock(SKCanvas canvas, Block block, IReadOnlyDictionary<string, SKBitmap> images, float top)
         {
-            using var typeface = SKTypeface.FromFamilyName("Arial", block.Bold ? SKFontStyle.Bold : SKFontStyle.Normal);
-            using var font = new SKFont(typeface, block.Size);
-            using var paint = new SKPaint { Color = block.Color, IsAntialias = true };
             var lineHeight = block.Size * 1.65f;
-            var x = Padding;
+            var left = Padding + (block.Content.Quote ? 22 : 0);
+            var x = left;
             var y = top;
-            var position = 0;
-            foreach (Match emoji in EmojiPattern.Matches(block.Text))
+            for (var runIndex = 0; runIndex < block.Content.Runs.Count; runIndex++)
             {
-                DrawWords(block.Text.Substring(position, emoji.Index - position));
-                if (images.TryGetValue(emoji.Groups["id"].Value, out var bitmap))
+                var run = block.Content.Runs[runIndex];
+                if (y >= MaxHeight - 120) break;
+                var code = (run.Style & (TextStyle.Code | TextStyle.Pre)) != 0;
+                var bold = !code && (block.Bold || run.Style.HasFlag(TextStyle.Bold));
+                var italic = !code && run.Style.HasFlag(TextStyle.Italic);
+                var style = bold ? italic ? SKFontStyle.BoldItalic : SKFontStyle.Bold
+                    : italic ? SKFontStyle.Italic : SKFontStyle.Normal;
+                using var typeface = SKTypeface.FromFamilyName(code ? "Courier New" : "Arial", style);
+                using var font = new SKFont(typeface, block.Size);
+                using var paint = new SKPaint
+                {
+                    Color = !code && run.Url != null ? new SKColor(130, 177, 228) : block.Color,
+                    IsAntialias = true
+                };
+                using var background = new SKPaint { Color = new SKColor(15, 23, 33), IsAntialias = true };
+                var spoiler = run.Style.HasFlag(TextStyle.Spoiler);
+                if (run.Style.HasFlag(TextStyle.Pre) && x > left) NewLine();
+                if (run.EmojiId != null)
                 {
                     var size = block.Size * 1.4f;
                     Wrap(size + 4);
                     if (y < MaxHeight - 120)
                     {
-                        var scale = Math.Min(size / bitmap.Width, size / bitmap.Height);
-                        var width = bitmap.Width * scale;
-                        var height = bitmap.Height * scale;
-                        canvas.DrawBitmap(bitmap, new SKRect(x + (size - width) / 2, y + (lineHeight - height) / 2,
-                            x + (size + width) / 2, y + (lineHeight + height) / 2));
-                        x += size + 4;
+                        if (spoiler)
+                        {
+                            canvas.DrawRect(new SKRect(x, y + 5, x + size + 4, y + lineHeight - 5), background);
+                            x += size + 4;
+                        }
+                        else if (images.TryGetValue(run.EmojiId, out var bitmap))
+                        {
+                            var scale = Math.Min(size / bitmap.Width, size / bitmap.Height);
+                            var width = bitmap.Width * scale;
+                            var height = bitmap.Height * scale;
+                            canvas.DrawBitmap(bitmap, new SKRect(x + (size - width) / 2, y + (lineHeight - height) / 2,
+                                x + (size + width) / 2, y + (lineHeight + height) / 2));
+                            Decorate(size + 4, y + lineHeight * 0.75f);
+                            x += size + 4;
+                        }
+                        else DrawWords(":" + run.Text.Split(':')[1] + ":");
                     }
                 }
-                else DrawWords(":" + emoji.Groups["name"].Value + ":");
-                position = emoji.Index + emoji.Length;
+                else DrawWords(run.Text);
+                if (run.Style.HasFlag(TextStyle.Pre) && x > left && runIndex + 1 < block.Content.Runs.Count
+                    && !block.Content.Runs[runIndex + 1].Text.StartsWith('\n')) NewLine();
+
+                void DrawWords(string text)
+                {
+                    foreach (Match word in Words.Matches(text.Replace("\t", "    ")))
+                    {
+                        if (y >= MaxHeight - 120) return;
+                        if (word.Value is "\n" or "\r" or "\r\n") { NewLine(); continue; }
+                        if (!string.IsNullOrWhiteSpace(word.Value)) Wrap(font.MeasureText(word.Value));
+                        var elements = StringInfo.GetTextElementEnumerator(word.Value);
+                        while (elements.MoveNext())
+                        {
+                            var element = elements.GetTextElement();
+                            var codePoint = char.ConvertToUtf32(element, 0);
+                            using var fallback = font.ContainsGlyphs(element) ? null : SKFontManager.Default.MatchCharacter(codePoint);
+                            using var glyphFont = new SKFont(fallback ?? typeface, block.Size);
+                            var needsShaping = element.Length > (codePoint > 0xFFFF ? 2 : 1);
+                            using var shaper = needsShaping ? new SKShaper(glyphFont.Typeface) : null;
+                            var width = shaper == null ? glyphFont.MeasureText(element) : shaper.Shape(element, glyphFont).Width;
+                            Wrap(width);
+                            if (y >= MaxHeight - 120) return;
+                            var baseline = y + (lineHeight - glyphFont.Metrics.Descent - glyphFont.Metrics.Ascent) / 2;
+                            if (code || spoiler) canvas.DrawRect(new SKRect(x, y + 5, x + width + 0.5f, y + lineHeight - 5), background);
+                            if (!spoiler)
+                            {
+                                if (shaper == null)
+                                    canvas.DrawText(element, x, baseline, SKTextAlign.Left, glyphFont, paint);
+                                else
+                                    canvas.DrawShapedText(shaper, element, x, baseline, SKTextAlign.Left, glyphFont, paint);
+                                Decorate(width, baseline);
+                            }
+                            x += width;
+                        }
+                    }
+                }
+
+                void Decorate(float width, float baseline)
+                {
+                    if (code) return;
+                    paint.StrokeWidth = Math.Max(1.5f, block.Size / 18);
+                    if (run.Style.HasFlag(TextStyle.Underline) || run.Url != null)
+                        canvas.DrawLine(x, baseline + 3, x + width, baseline + 3, paint);
+                    if (run.Style.HasFlag(TextStyle.Strike))
+                        canvas.DrawLine(x, baseline - block.Size * 0.3f, x + width, baseline - block.Size * 0.3f, paint);
+                }
             }
-            DrawWords(block.Text.Substring(position));
+            if (block.Content.Quote)
+            {
+                using var rule = new SKPaint { Color = new SKColor(130, 150, 170), IsAntialias = true };
+                canvas.DrawRoundRect(new SKRect(Padding, top + 5, Padding + 4, Math.Min(y + lineHeight - 5, MaxHeight - 120)), 2, 2, rule);
+            }
             return y + lineHeight;
+
+            void NewLine() { x = left; y += lineHeight; }
 
             void Wrap(float width)
             {
-                if (x > Padding && x + width > Width - Padding)
-                {
-                    x = Padding;
-                    y += lineHeight;
-                }
-            }
-
-            void DrawWords(string text)
-            {
-                foreach (Match word in Words.Matches(text))
-                {
-                    if (y >= MaxHeight - 120) return;
-                    if (word.Value is "\n" or "\r" or "\r\n")
-                    {
-                        x = Padding;
-                        y += lineHeight;
-                        continue;
-                    }
-                    if (string.IsNullOrWhiteSpace(word.Value))
-                    {
-                        if (x > Padding) x += font.MeasureText(" ");
-                        continue;
-                    }
-                    Wrap(font.MeasureText(word.Value));
-                    var elements = StringInfo.GetTextElementEnumerator(word.Value);
-                    while (elements.MoveNext())
-                    {
-                        var element = elements.GetTextElement();
-                        var codePoint = char.ConvertToUtf32(element, 0);
-                        using var fallback = font.ContainsGlyphs(element) ? null : SKFontManager.Default.MatchCharacter(codePoint);
-                        using var glyphFont = new SKFont(fallback ?? typeface, block.Size);
-                        var needsShaping = element.Length > (codePoint > 0xFFFF ? 2 : 1);
-                        using var shaper = needsShaping ? new SKShaper(glyphFont.Typeface) : null;
-                        var width = shaper == null ? glyphFont.MeasureText(element) : shaper.Shape(element, glyphFont).Width;
-                        Wrap(width);
-                        if (y >= MaxHeight - 120) return;
-                        var baseline = y + (lineHeight - glyphFont.Metrics.Descent - glyphFont.Metrics.Ascent) / 2;
-                        if (shaper == null)
-                            canvas.DrawText(element, x, baseline, SKTextAlign.Left, glyphFont, paint);
-                        else
-                            canvas.DrawShapedText(shaper, element, x, baseline, SKTextAlign.Left, glyphFont, paint);
-                        x += width;
-                    }
-                }
+                if (x > left && x + width > Width - Padding) NewLine();
             }
         }
 
@@ -223,6 +268,6 @@ namespace DiscordTelegramFrontier
         }
 
         private sealed record CachedEmoji(byte[] Bytes, DateTimeOffset Expires);
-        private sealed record Block(string Text, float Size, SKColor Color, bool Bold = false);
+        private sealed record Block(TextBlock Content, float Size, SKColor Color, bool Bold = false);
     }
 }

@@ -27,6 +27,8 @@ await provider.GetRequiredService<FrontierService>().StartAsync();
 
 `[Frontier]` sends text; `[FrontierAsImage]` sends PNG with cached Discord emoji and works on its own. `ModifyAsync` updates the same message. Image mode uses static emoji frames and renders embed images as links; Linux needs fontconfig and suitable fonts.
 
+Both modes translate Discord formatting in messages and embeds: emphasis, links, code, spoilers, quotes, lists and headings. PNG spoilers stay masked and links are visual only; Telegram text uses bold headings and italic subtext.
+
 Mark a command:
 ```csharp
 [Frontier]
