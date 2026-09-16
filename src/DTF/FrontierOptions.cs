@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace DiscordTelegramFrontier
@@ -6,6 +7,7 @@ namespace DiscordTelegramFrontier
     {
         public string TelegramToken { get; set; }
         public ulong DefaultGuildId { get; set; }
+        public Action<Exception> ErrorHandler { get; set; }
 
         public Dictionary<long, ulong> ChatToGuild { get; } = new();
         public Dictionary<long, ulong> UserToDiscord { get; } = new();

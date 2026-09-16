@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -15,50 +15,90 @@ using Telegram.Bot.Types.Enums;
 
 namespace DiscordTelegramFrontier
 {
-    public sealed class FrontierService
+    public sealed class FrontierService : IAsyncDisposable
     {
         private readonly DiscordSocketClient _discord;
         private readonly CommandService _commands;
         private readonly IServiceProvider _services;
         private readonly FrontierOptions _opts;
 
-        private TelegramBotClient _tg;
-        private HashSet<string> _allowed;
+        private ITelegramBotClient _tg;
         private CancellationTokenSource _cts;
+        private readonly SemaphoreSlim _lifecycle = new(1, 1);
+        private readonly object _stopLock = new();
+        private readonly ConditionalWeakTable<ICommandContext, FailureState> _failures = new();
+        private Task _receiver;
+        private string _username;
 
-        public FrontierService(DiscordSocketClient discord, CommandService commands, IServiceProvider services, FrontierOptions opts)
+        public FrontierService(DiscordSocketClient discord, CommandService commands, IServiceProvider services, FrontierOptions opts,
+            ITelegramBotClient telegramClient = null)
         {
             _discord = discord;
             _commands = commands;
             _services = services;
             _opts = opts;
+            _tg = telegramClient;
         }
 
-        public Task StartAsync()
+        public async Task StartAsync()
         {
-            if (string.IsNullOrWhiteSpace(_opts.TelegramToken))
-                return Task.CompletedTask;
-
-            _allowed = DiscoverFrontierAliases();
-            _tg = new TelegramBotClient(_opts.TelegramToken);
-            _cts = new CancellationTokenSource();
-            _tg.StartReceiving(HandleUpdateAsync, HandleErrorAsync,
-                new ReceiverOptions { AllowedUpdates = new[] { UpdateType.Message } }, _cts.Token);
-
-            return Task.CompletedTask;
+            if (_tg == null && string.IsNullOrWhiteSpace(_opts.TelegramToken))
+                return;
+            await _lifecycle.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (_receiver != null && !_receiver.IsCompleted)
+                    return;
+                _tg ??= new TelegramBotClient(_opts.TelegramToken);
+                lock (_stopLock)
+                {
+                    _cts?.Dispose();
+                    _cts = new CancellationTokenSource();
+                }
+                _username = (await _tg.GetMe(cancellationToken: _cts.Token).ConfigureAwait(false)).Username;
+                _commands.CommandExecuted -= HandleCommandExecutedAsync;
+                _commands.CommandExecuted += HandleCommandExecutedAsync;
+                _receiver = _tg.ReceiveAsync(HandleUpdateAsync, HandleErrorAsync,
+                    new ReceiverOptions { AllowedUpdates = new[] { UpdateType.Message } }, _cts.Token);
+            }
+            finally
+            {
+                _lifecycle.Release();
+            }
         }
 
-        public void Stop() => _cts?.Cancel();
-
-        private HashSet<string> DiscoverFrontierAliases()
+        public void Stop()
         {
-            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var cmd in _commands.Commands)
-                if (cmd.Attributes.Any(a => a is FrontierAttribute))
-                    foreach (var alias in cmd.Aliases)
-                        set.Add(alias);
-            return set;
+            lock (_stopLock) _cts?.Cancel();
         }
+
+        public async Task StopAsync()
+        {
+            Stop();
+            await _lifecycle.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                Stop();
+                if (_receiver != null)
+                {
+                    try { await _receiver.ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+                    finally { _receiver = null; }
+                }
+            }
+            finally
+            {
+                _commands.CommandExecuted -= HandleCommandExecutedAsync;
+                lock (_stopLock)
+                {
+                    _cts?.Dispose();
+                    _cts = null;
+                }
+                _lifecycle.Release();
+            }
+        }
+
+        public async ValueTask DisposeAsync() => await StopAsync().ConfigureAwait(false);
 
         private async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken ct)
         {
@@ -68,11 +108,19 @@ namespace DiscordTelegramFrontier
 
             var text = raw.TrimStart();
             if (text.StartsWith("/"))
+            {
                 text = text.Substring(1);
-
-            var name = text.Split(new[] { ' ' }, 2)[0];
-            if (!_allowed.Contains(name))
-                return;
+                var end = 0;
+                while (end < text.Length && !char.IsWhiteSpace(text[end])) end++;
+                var mention = text.IndexOf('@', 0, end);
+                if (mention >= 0)
+                {
+                    if (!string.Equals(text.Substring(mention + 1, end - mention - 1), _username, StringComparison.OrdinalIgnoreCase))
+                        return;
+                    text = text.Remove(mention, end - mention);
+                }
+            }
+            if (string.IsNullOrWhiteSpace(text)) return;
 
             if (!_opts.ChatToGuild.TryGetValue(msg.Chat.Id, out var guildId))
                 guildId = _opts.DefaultGuildId;
@@ -83,7 +131,7 @@ namespace DiscordTelegramFrontier
             if (guild is not null && msg.From is { } from && _opts.UserToDiscord.TryGetValue(from.Id, out var discordId))
                 user = guild.GetUser(discordId);
 
-            var channel = new FrontierProxyChannel(bot, msg.Chat.Id);
+            var channel = new FrontierProxyChannel(bot, msg.Chat.Id, _discord.CurrentUser);
             var context = (SocketCommandContext)RuntimeHelpers.GetUninitializedObject(typeof(SocketCommandContext));
             SetField(context, "Client", _discord);
             SetField(context, "Guild", guild);
@@ -91,16 +139,61 @@ namespace DiscordTelegramFrontier
             SetField(context, "User", user);
             SetField(context, "Message", null);
 
-            await _commands.ExecuteAsync(context, text, _services);
+            var matches = _commands.Search(context, text);
+            if (!matches.IsSuccess || matches.Commands.Count == 0)
+                return;
+            if (matches.Commands.Any(match => !match.Command.Attributes.Any(a => a is FrontierAttribute)))
+                return;
+
+            var result = await _commands.ExecuteAsync(context, text, _services).ConfigureAwait(false);
+            await ReportFailureAsync(context, result).ConfigureAwait(false);
         }
 
-        private Task HandleErrorAsync(ITelegramBotClient bot, Exception ex, CancellationToken ct) => Task.CompletedTask;
+        private Task HandleErrorAsync(ITelegramBotClient bot, Exception ex, CancellationToken ct)
+        {
+            if (!(ex is OperationCanceledException && ct.IsCancellationRequested))
+                ReportError(ex);
+            return Task.CompletedTask;
+        }
+
+        private Task HandleCommandExecutedAsync(Optional<CommandInfo> command, ICommandContext context, IResult result)
+            => ReportFailureAsync(context, result);
+
+        private async Task ReportFailureAsync(ICommandContext context, IResult result)
+        {
+            if (result.IsSuccess || context.Channel is not FrontierProxyChannel channel || !channel.UsesClient(_tg))
+                return;
+            if (Interlocked.Exchange(ref _failures.GetValue(context, _ => new FailureState()).Reported, 1) != 0)
+                return;
+            ReportError(result is ExecuteResult execution && execution.Exception != null
+                ? execution.Exception : new InvalidOperationException(result.ErrorReason));
+            try
+            {
+                await ((IMessageChannel)channel).SendMessageAsync("Не удалось выполнить команду.").ConfigureAwait(false);
+            }
+            catch (Exception ex) { ReportError(ex); }
+        }
+
+        private void ReportError(Exception ex)
+        {
+            if (_opts.ErrorHandler == null)
+                Trace.TraceError(ex.ToString());
+            else
+            {
+                try { _opts.ErrorHandler(ex); }
+                catch (Exception handlerError) { Trace.TraceError(handlerError.ToString()); }
+            }
+        }
+
+        private sealed class FailureState { public int Reported; }
 
         private static void SetField(object target, string propertyName, object value)
         {
             var field = typeof(SocketCommandContext)
                 .GetField($"<{propertyName}>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic);
-            field?.SetValue(target, value);
+            if (field == null)
+                throw new MissingFieldException(typeof(SocketCommandContext).FullName, propertyName);
+            field.SetValue(target, value);
         }
     }
 }

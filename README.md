@@ -1,6 +1,7 @@
-# DiscordTelegramFrontier (DTF)
+﻿# DiscordTelegramFrontier (DTF)
 
-A pluggable bridge that reuses **existing Discord.Net commands** in Telegram — without rewriting the commands. Mark a command with `[Frontier]` and it becomes available in Telegram.
+Reuses existing Discord.Net prefix commands in Telegram. Keep
+`ModuleBase<SocketCommandContext>` and mark portable commands with `[Frontier]`.
 
 ## How it works
 
@@ -17,11 +18,11 @@ TG update → FrontierService → proxy ICommandContext → CommandService.Execu
 services.AddFrontier(o =>
 {
     o.TelegramToken = "<bot token>";
-    o.Chat(telegramChatId, discordGuildId);      // TG chat → Discord guild
-    o.User(telegramUserId, discordUserId);        // user link (for permissions)
+    o.Chat(telegramChatId, discordGuildId);
+    o.User(telegramUserId, discordUserId);
+    o.ErrorHandler = ex => Console.Error.WriteLine(ex);
 });
 
-// after the Discord client has started:
 await provider.GetRequiredService<FrontierService>().StartAsync();
 ```
 
