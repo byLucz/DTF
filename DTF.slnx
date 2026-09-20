@@ -1,5 +1,3 @@
 <Solution>
-  <Folder Name="/src/">
-    <Project Path="src/DTF/DTF.csproj" />
-  </Folder>
+  <Project Path="DTF/DTF.csproj" />
 </Solution>
