@@ -36,6 +36,10 @@ Mark a command:
 public async Task Weather(params string[] city) { ... await ReplyAsync(embed: e.Build()); }
 ```
 
+Telegram modules implement `IFrontierModule` and register through `AddFrontierModule<T>()`; pass update types for buttons or other events. `AddFrontierMiddleware<T>()` adds shared checks. Modules are created only for matching updates, within one DI scope per update. Full Telegram.Bot access remains available through the context.
+
+Use `ProcessUpdateAsync` with an external receiver, or `EnableDiscordCommands = false` without Discord services. DTF rendering and edits are available to modules through `CreateReplyChannel()`.
+
 ## Limitations (MVP)
 
 - Only text/data commands that reply via `ReplyAsync` / `Context.Channel.SendMessageAsync` are portable.
@@ -45,3 +49,5 @@ public async Task Weather(params string[] city) { ... await ReplyAsync(embed: e.
 ## Stack
 
 - net10.0, Discord.Net 3.20.1, Telegram.Bot 22.6.0.
+
+Package version: `1.1.0`. Run `dotnet pack src/DTF/DTF.csproj -c Release` from the DTF directory to create `.nupkg` and `.snupkg` in `artifacts/`; this does not publish them.

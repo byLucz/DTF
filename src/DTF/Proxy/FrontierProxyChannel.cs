@@ -18,15 +18,20 @@ namespace DiscordTelegramFrontier
     {
         private readonly ITelegramBotClient _tg;
         private readonly long _chatId;
+        private readonly int? _messageThreadId;
+        private readonly string _businessConnectionId;
         private readonly IUser _author;
         private bool _renderAsImage;
         private static readonly TelegramImageRenderer ImageRenderer = new();
         private readonly ConcurrentDictionary<ulong, FrontierProxyMessage> _messages = new();
 
-        public FrontierProxyChannel(ITelegramBotClient tg, long chatId, IUser author = null, bool renderAsImage = false)
+        public FrontierProxyChannel(ITelegramBotClient tg, long chatId, IUser author = null, bool renderAsImage = false,
+            int? messageThreadId = null, string businessConnectionId = null)
         {
             _tg = tg ?? throw new ArgumentNullException(nameof(tg));
             _chatId = chatId;
+            _messageThreadId = messageThreadId;
+            _businessConnectionId = businessConnectionId;
             _author = author;
             _renderAsImage = renderAsImage;
         }
@@ -55,12 +60,15 @@ namespace DiscordTelegramFrontier
             if (rendered.Png != null)
             {
                 using var stream = new MemoryStream(rendered.Png, false);
-                return await _tg.SendPhoto(_chatId, InputFile.FromStream(stream, "message.png"), cancellationToken: ct).ConfigureAwait(false);
+                return await _tg.SendPhoto(_chatId, InputFile.FromStream(stream, "message.png"), messageThreadId: _messageThreadId,
+                    businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
             }
             return rendered.ImageUrl == null
-                ? await _tg.SendMessage(_chatId, rendered.Text, parseMode: ParseMode.Html, cancellationToken: ct).ConfigureAwait(false)
+                ? await _tg.SendMessage(_chatId, rendered.Text, parseMode: ParseMode.Html, messageThreadId: _messageThreadId,
+                    businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false)
                 : await _tg.SendPhoto(_chatId, InputFile.FromUri(rendered.ImageUrl), caption: rendered.Text,
-                    parseMode: ParseMode.Html, cancellationToken: ct).ConfigureAwait(false);
+                    parseMode: ParseMode.Html, messageThreadId: _messageThreadId,
+                    businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
         }
 
         internal async Task<int> EditAsync(int messageId, TelegramRenderedMessage previous,
@@ -74,14 +82,14 @@ namespace DiscordTelegramFrontier
                 var replacement = await SendRenderedAsync(next, ct).ConfigureAwait(false);
                 try
                 {
-                    await _tg.DeleteMessage(_chatId, messageId, cancellationToken: ct).ConfigureAwait(false);
+                    await DeleteAsync(messageId, ct).ConfigureAwait(false);
                 }
                 catch (Exception deleteError)
                 {
                     try
                     {
                         using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                        await _tg.DeleteMessage(_chatId, replacement.Id, cancellationToken: cleanup.Token).ConfigureAwait(false);
+                        await DeleteAsync(replacement.Id, cleanup.Token).ConfigureAwait(false);
                     }
                     catch (Exception cleanupError)
                     {
@@ -98,20 +106,21 @@ namespace DiscordTelegramFrontier
                 {
                     using var stream = new MemoryStream(next.Png, false);
                     await _tg.EditMessageMedia(_chatId, messageId,
-                        new InputMediaPhoto(InputFile.FromStream(stream, "message.png")), cancellationToken: ct).ConfigureAwait(false);
+                        new InputMediaPhoto(InputFile.FromStream(stream, "message.png")),
+                        businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
                 }
                 else if (next.ImageUrl == null)
                     await _tg.EditMessageText(_chatId, messageId, next.Text, parseMode: ParseMode.Html,
-                        cancellationToken: ct).ConfigureAwait(false);
+                        businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
                 else if (previous.ImageUrl == next.ImageUrl && previous.Png == null)
                     await _tg.EditMessageCaption(_chatId, messageId, caption: next.Text, parseMode: ParseMode.Html,
-                        cancellationToken: ct).ConfigureAwait(false);
+                        businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
                 else
                     await _tg.EditMessageMedia(_chatId, messageId, new InputMediaPhoto(InputFile.FromUri(next.ImageUrl))
                     {
                         Caption = next.Text,
                         ParseMode = ParseMode.Html
-                    }, cancellationToken: ct).ConfigureAwait(false);
+                    }, businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
             }
             catch (ApiRequestException ex) when (ex.ErrorCode == 400 &&
                 ex.Message.Contains("message is not modified", StringComparison.OrdinalIgnoreCase))
@@ -121,7 +130,8 @@ namespace DiscordTelegramFrontier
         }
 
         internal Task DeleteAsync(int messageId, CancellationToken ct)
-            => _tg.DeleteMessage(_chatId, messageId, cancellationToken: ct);
+            => _businessConnectionId == null ? _tg.DeleteMessage(_chatId, messageId, cancellationToken: ct)
+                : _tg.DeleteBusinessMessages(_businessConnectionId, new[] { messageId }, cancellationToken: ct);
 
         internal void Forget(ulong id) => _messages.TryRemove(id, out _);
         internal bool UsesClient(ITelegramBotClient client) => ReferenceEquals(_tg, client);

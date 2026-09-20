@@ -7,7 +7,28 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>DTF</AssemblyName>
     <RootNamespace>DiscordTelegramFrontier</RootNamespace>
+    <IsPackable>true</IsPackable>
+    <PackageId>DTF</PackageId>
+    <Authors>byLucz</Authors>
+    <Description>Reuse Discord.Net commands in Telegram with native Telegram modules, message editing and text or image rendering.</Description>
+    <PackageTags>discord;telegram;commands;bridge;bot</PackageTags>
+    <PackageProjectUrl>https://github.com/byLucz/DTF</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/byLucz/DTF</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType>portable</DebugType>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)../../artifacts</PackageOutputPath>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE.txt" Pack="true" PackagePath="/" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Discord.Net" Version="3.20.1" />

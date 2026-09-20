@@ -1,0 +1,8 @@
+<Project>
+  <PropertyGroup>
+    <Version>1.1.0</Version>
+    <InformationalVersion>$(Version)</InformationalVersion>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+</Project>

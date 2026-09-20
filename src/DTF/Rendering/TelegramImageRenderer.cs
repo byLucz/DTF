@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -20,7 +19,7 @@ namespace DiscordTelegramFrontier
         private const int MaxHeight = 6000;
         private const float Padding = 40;
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
-        private static readonly ConcurrentDictionary<string, CachedEmoji> EmojiCache = new();
+        private static readonly EmojiImageCache EmojiCache = new();
         private static readonly SemaphoreSlim Downloads = new(4, 4);
         private static readonly Regex Words = new(@"\r\n|\r|\n|[^\S\r\n]+|[^\s]+", RegexOptions.Compiled);
 
@@ -66,6 +65,7 @@ namespace DiscordTelegramFrontier
                 }
                 cancellationToken.ThrowIfCancellationRequested();
                 using var recorder = new SKPictureRecorder();
+                using var fonts = new RenderFontCache();
                 var canvas = recorder.BeginRecording(new SKRect(0, 0, Width, MaxHeight));
                 var y = Padding;
                 foreach (var block in blocks)
@@ -79,7 +79,7 @@ namespace DiscordTelegramFrontier
                         y += 27;
                         continue;
                     }
-                    y = DrawBlock(canvas, block, images, y) + 18;
+                    y = DrawBlock(canvas, block, images, fonts, y, cancellationToken) + 18;
                 }
                 if (y > MaxHeight - 120)
                 {
@@ -121,7 +121,8 @@ namespace DiscordTelegramFrontier
             }
         }
 
-        private static float DrawBlock(SKCanvas canvas, Block block, IReadOnlyDictionary<string, SKBitmap> images, float top)
+        private static float DrawBlock(SKCanvas canvas, Block block, IReadOnlyDictionary<string, SKBitmap> images,
+            RenderFontCache fonts, float top, CancellationToken cancellationToken)
         {
             var lineHeight = block.Size * 1.65f;
             var left = Padding + (block.Content.Quote ? 22 : 0);
@@ -134,10 +135,8 @@ namespace DiscordTelegramFrontier
                 var code = (run.Style & (TextStyle.Code | TextStyle.Pre)) != 0;
                 var bold = !code && (block.Bold || run.Style.HasFlag(TextStyle.Bold));
                 var italic = !code && run.Style.HasFlag(TextStyle.Italic);
-                var style = bold ? italic ? SKFontStyle.BoldItalic : SKFontStyle.Bold
-                    : italic ? SKFontStyle.Italic : SKFontStyle.Normal;
-                using var typeface = SKTypeface.FromFamilyName(code ? "Courier New" : "Arial", style);
-                using var font = new SKFont(typeface, block.Size);
+                var fontResource = fonts.GetFont(code, bold, italic, block.Size);
+                var font = fontResource.Font;
                 using var paint = new SKPaint
                 {
                     Color = !code && run.Url != null ? new SKColor(130, 177, 228) : block.Color,
@@ -178,6 +177,7 @@ namespace DiscordTelegramFrontier
                 {
                     foreach (Match word in Words.Matches(text.Replace("\t", "    ")))
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         if (y >= MaxHeight - 120) return;
                         if (word.Value is "\n" or "\r" or "\r\n") { NewLine(); continue; }
                         if (!string.IsNullOrWhiteSpace(word.Value)) Wrap(font.MeasureText(word.Value));
@@ -185,22 +185,19 @@ namespace DiscordTelegramFrontier
                         while (elements.MoveNext())
                         {
                             var element = elements.GetTextElement();
-                            var codePoint = char.ConvertToUtf32(element, 0);
-                            using var fallback = font.ContainsGlyphs(element) ? null : SKFontManager.Default.MatchCharacter(codePoint);
-                            using var glyphFont = new SKFont(fallback ?? typeface, block.Size);
-                            var needsShaping = element.Length > (codePoint > 0xFFFF ? 2 : 1);
-                            using var shaper = needsShaping ? new SKShaper(glyphFont.Typeface) : null;
-                            var width = shaper == null ? glyphFont.MeasureText(element) : shaper.Shape(element, glyphFont).Width;
+                            var glyph = fonts.GetGlyph(fontResource, element);
+                            var glyphFont = glyph.Font.Font;
+                            var width = glyph.Width;
                             Wrap(width);
                             if (y >= MaxHeight - 120) return;
-                            var baseline = y + (lineHeight - glyphFont.Metrics.Descent - glyphFont.Metrics.Ascent) / 2;
+                            var baseline = y + (lineHeight - glyph.Font.Metrics.Descent - glyph.Font.Metrics.Ascent) / 2;
                             if (code || spoiler) canvas.DrawRect(new SKRect(x, y + 5, x + width + 0.5f, y + lineHeight - 5), background);
                             if (!spoiler)
                             {
-                                if (shaper == null)
+                                if (!glyph.Shaped)
                                     canvas.DrawText(element, x, baseline, SKTextAlign.Left, glyphFont, paint);
                                 else
-                                    canvas.DrawShapedText(shaper, element, x, baseline, SKTextAlign.Left, glyphFont, paint);
+                                    canvas.DrawShapedText(glyph.Font.Shaper, element, x, baseline, SKTextAlign.Left, glyphFont, paint);
                                 Decorate(width, baseline);
                             }
                             x += width;
@@ -235,11 +232,11 @@ namespace DiscordTelegramFrontier
 
         private static async Task<byte[]> DownloadEmojiAsync(string id, CancellationToken ct)
         {
-            if (EmojiCache.TryGetValue(id, out var cached) && cached.Expires > DateTimeOffset.UtcNow) return cached.Bytes;
+            if (EmojiCache.TryGet(id, out var cached)) return cached;
             await Downloads.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                if (EmojiCache.TryGetValue(id, out cached) && cached.Expires > DateTimeOffset.UtcNow) return cached.Bytes;
+                if (EmojiCache.TryGet(id, out cached)) return cached;
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeout.CancelAfter(TimeSpan.FromSeconds(10));
                 using var response = await Http.GetAsync($"https://cdn.discordapp.com/emojis/{id}.png?size=96", HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
@@ -259,15 +256,9 @@ namespace DiscordTelegramFrontier
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return Remember(null); }
             finally { Downloads.Release(); }
 
-            byte[] Remember(byte[] bytes)
-            {
-                if (EmojiCache.Count >= 256) EmojiCache.Clear();
-                EmojiCache[id] = new CachedEmoji(bytes, DateTimeOffset.UtcNow.AddMinutes(bytes == null ? 1 : 60));
-                return bytes;
-            }
+            byte[] Remember(byte[] bytes) => EmojiCache.Remember(id, bytes);
         }
 
-        private sealed record CachedEmoji(byte[] Bytes, DateTimeOffset Expires);
         private sealed record Block(TextBlock Content, float Size, SKColor Color, bool Bold = false);
     }
 }
