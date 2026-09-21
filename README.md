@@ -50,4 +50,4 @@ Use `ProcessUpdateAsync` with an external receiver, or `EnableDiscordCommands = 
 
 - net10.0, Discord.Net 3.20.1, Telegram.Bot 22.6.0.
 
-Package version: `1.1.0`. Run `dotnet pack DTF/DTF.csproj -c Release` from the DTF directory to create `.nupkg` and `.snupkg` in `artifacts/`; this does not publish them.
+Package version: `1.1.0`. Run `dotnet pack DTF.csproj -c Release` from the DTF directory to create `.nupkg` and `.snupkg` in `artifacts/`; this does not publish them.
