@@ -34,7 +34,7 @@ namespace DiscordTelegramFrontier
             BotUsername = botUsername;
             Services = services ?? throw new ArgumentNullException(nameof(services));
             CancellationToken = cancellationToken;
-            var text = update.Message?.Text?.TrimStart();
+            var text = (update.Message ?? update.ChannelPost)?.Text?.TrimStart();
             if (string.IsNullOrEmpty(text) || !text.StartsWith('/')) return;
             var end = 1;
             while (end < text.Length && !char.IsWhiteSpace(text[end])) end++;
