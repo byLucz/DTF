@@ -287,13 +287,13 @@ namespace DiscordTelegramFrontier
                 return;
             if (Interlocked.Exchange(ref failure.Reported, 1) != 0)
                 return;
-            ReportError(result is ExecuteResult execution && execution.Exception != null
-                ? execution.Exception : new InvalidOperationException(result.ErrorReason));
-            var reply = result.Error is CommandError.ParseFailed or CommandError.ObjectNotFound
+            var userError = result.Error is CommandError.ParseFailed or CommandError.ObjectNotFound
                 or CommandError.BadArgCount or CommandError.UnmetPrecondition
-                && !string.IsNullOrWhiteSpace(result.ErrorReason)
-                    ? result.ErrorReason
-                    : "Не удалось выполнить команду.";
+                && !string.IsNullOrWhiteSpace(result.ErrorReason);
+            if (!userError)
+                ReportError(result is ExecuteResult execution && execution.Exception != null
+                    ? execution.Exception : new InvalidOperationException(result.ErrorReason));
+            var reply = userError ? result.ErrorReason : "Не удалось выполнить команду.";
             try
             {
                 await ((IMessageChannel)channel).SendMessageAsync(reply).ConfigureAwait(false);
