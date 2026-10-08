@@ -136,6 +136,7 @@ namespace DiscordTelegramFrontier
             botUsername ??= await GetBotUsernameAsync(bot, cancellationToken).ConfigureAwait(false);
             await using var scope = _services.CreateAsyncScope();
             var context = new FrontierUpdateContext(bot, update, botUsername, scope.ServiceProvider, cancellationToken);
+            FrontierUsers.Remember(update.Message ?? update.ChannelPost);
             if (context.AddressedToAnotherBot) return false;
             try
             {
@@ -208,6 +209,7 @@ namespace DiscordTelegramFrontier
             var channel = new FrontierProxyChannel(bot, msg.Chat.Id, _discord.CurrentUser,
                 messageThreadId: msg.MessageThreadId, businessConnectionId: msg.BusinessConnectionId);
             var context = DiscordContextFactory.Create(_discord, guild, channel, user);
+            FrontierUsers.Attach(context, msg, guild, _opts);
 
             var matches = _commands.Search(context, text);
             if (!matches.IsSuccess || matches.Commands.Count == 0)
@@ -287,9 +289,14 @@ namespace DiscordTelegramFrontier
                 return;
             ReportError(result is ExecuteResult execution && execution.Exception != null
                 ? execution.Exception : new InvalidOperationException(result.ErrorReason));
+            var reply = result.Error is CommandError.ParseFailed or CommandError.ObjectNotFound
+                or CommandError.BadArgCount or CommandError.UnmetPrecondition
+                && !string.IsNullOrWhiteSpace(result.ErrorReason)
+                    ? result.ErrorReason
+                    : "Не удалось выполнить команду.";
             try
             {
-                await ((IMessageChannel)channel).SendMessageAsync("Не удалось выполнить команду.").ConfigureAwait(false);
+                await ((IMessageChannel)channel).SendMessageAsync(reply).ConfigureAwait(false);
             }
             catch (Exception ex) { ReportError(ex); }
         }
