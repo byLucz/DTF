@@ -79,6 +79,18 @@ namespace DiscordTelegramFrontier
                 : null;
         }
 
+        public static FrontierUser Sender(CommandState state)
+        {
+            var message = state.Message;
+
+            if (message.From is { } from)
+                return Proxy(from, from.Username);
+
+            return message.SenderChat is { } chat
+                ? new FrontierUser(chat.Id, chat.Username, chat.Title)
+                : null;
+        }
+
         public static FrontierUser Proxy(User user, string name)
         {
             if (user is null)
