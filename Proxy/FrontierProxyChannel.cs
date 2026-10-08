@@ -63,12 +63,43 @@ namespace DiscordTelegramFrontier
                 return await _tg.SendPhoto(_chatId, InputFile.FromStream(stream, "message.png"), messageThreadId: _messageThreadId,
                     businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
             }
-            return rendered.ImageUrl == null
-                ? await _tg.SendMessage(_chatId, rendered.Text, parseMode: ParseMode.Html, messageThreadId: _messageThreadId,
-                    businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false)
-                : await _tg.SendPhoto(_chatId, InputFile.FromUri(rendered.ImageUrl), caption: rendered.Text,
-                    parseMode: ParseMode.Html, messageThreadId: _messageThreadId,
-                    businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
+            if (rendered.ImageUrl == null)
+                return await SendTextAsync(rendered.Text, ct).ConfigureAwait(false);
+
+            try
+            {
+                var media = InputFile.FromUri(rendered.ImageUrl);
+                return IsAnimation(rendered.ImageUrl)
+                    ? await _tg.SendAnimation(_chatId, media, caption: rendered.Text, parseMode: ParseMode.Html,
+                        messageThreadId: _messageThreadId, businessConnectionId: _businessConnectionId,
+                        cancellationToken: ct).ConfigureAwait(false)
+                    : await _tg.SendPhoto(_chatId, media, caption: rendered.Text, parseMode: ParseMode.Html,
+                        messageThreadId: _messageThreadId, businessConnectionId: _businessConnectionId,
+                        cancellationToken: ct).ConfigureAwait(false);
+            }
+            catch (ApiRequestException)
+            {
+                var link = System.Net.WebUtility.HtmlEncode(rendered.ImageUrl);
+                var text = string.IsNullOrWhiteSpace(rendered.Text) || rendered.Text == "(empty)"
+                    ? link
+                    : rendered.Text + "\n" + link;
+                return await SendTextAsync(text, ct).ConfigureAwait(false);
+            }
+        }
+
+        private Task<Message> SendTextAsync(string text, CancellationToken ct)
+            => _tg.SendMessage(_chatId, text, parseMode: ParseMode.Html, messageThreadId: _messageThreadId,
+                businessConnectionId: _businessConnectionId, cancellationToken: ct);
+
+        private static bool IsAnimation(string url)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                return false;
+
+            var path = uri.AbsolutePath;
+            return path.EndsWith(".gif", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".webm", StringComparison.OrdinalIgnoreCase);
         }
 
         internal async Task<int> EditAsync(int messageId, TelegramRenderedMessage previous,
