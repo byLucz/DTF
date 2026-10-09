@@ -15,7 +15,7 @@ namespace DiscordTelegramFrontier
                 return await _discord.ReadAsync(context, input, services).ConfigureAwait(false);
 
             if (!FrontierUsers.TryFindMention(state, input, out var telegram, out var name))
-                return TypeReaderResult.FromError(CommandError.ParseFailed, $"{name} — не юзернейм, укажи пользователя через @упоминание");
+                return TypeReaderResult.FromError(CommandError.ParseFailed, $"{name} не юзернейм, укажи пользователя через @упоминание");
 
             return TypeReaderResult.FromSuccess((IUser)FrontierUsers.Linked(state, telegram) ?? FrontierUsers.Proxy(telegram, name));
         }

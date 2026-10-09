@@ -11,7 +11,8 @@ namespace DiscordTelegramFrontier
 {
     internal static class FrontierUsers
     {
-        private static readonly ConcurrentDictionary<string, User> Known = new(StringComparer.OrdinalIgnoreCase);
+        private const int MaxKnown = 2048;
+        private static readonly ConcurrentDictionary<string, (User User, DateTimeOffset Seen)> Known = new(StringComparer.OrdinalIgnoreCase);
         private static readonly ConditionalWeakTable<ICommandContext, CommandState> States = new();
 
         internal sealed record CommandState(Message Message, SocketGuild Guild, FrontierOptions Options);
@@ -30,8 +31,16 @@ namespace DiscordTelegramFrontier
 
         private static void Remember(User user)
         {
-            if (user is { IsBot: false, Username: { Length: > 0 } username })
-                Known[username] = user;
+            if (user is not { IsBot: false, Username: { Length: > 0 } username })
+                return;
+
+            Known[username] = (user, DateTimeOffset.UtcNow);
+
+            if (Known.Count <= MaxKnown)
+                return;
+
+            foreach (var stale in Known.OrderBy(pair => pair.Value.Seen).Take(Known.Count - MaxKnown * 3 / 4).ToArray())
+                Known.TryRemove(stale);
         }
 
         public static void Attach(ICommandContext context, Message message, SocketGuild guild, FrontierOptions options)
@@ -61,7 +70,7 @@ namespace DiscordTelegramFrontier
 
                 user = entity.Type == MessageEntityType.TextMention
                     ? entity.User
-                    : Known.TryGetValue(name.TrimStart('@'), out var known) ? known : null;
+                    : Known.TryGetValue(name.TrimStart('@'), out var known) ? known.User : null;
 
                 return true;
             }

@@ -12,6 +12,7 @@ namespace DiscordTelegramFrontier
     {
         public string TelegramToken { get; set; }
         public bool EnableDiscordCommands { get; set; } = true;
+        public bool GroupsRequireSlash { get; set; } = true;
         public ulong DefaultGuildId { get; set; }
         public Action<Exception> ErrorHandler { get; set; }
         public Func<ITelegramBotClient, Update, string, CancellationToken, Task<bool>> UpdateHandler { get; set; }
@@ -20,6 +21,8 @@ namespace DiscordTelegramFrontier
 
         public Dictionary<long, ulong> ChatToGuild { get; } = new();
         public Dictionary<long, ulong> UserToDiscord { get; } = new();
+
+        public bool AcceptsPlainCommand(Chat chat) => !GroupsRequireSlash || chat?.Type == ChatType.Private;
 
         public FrontierOptions DefaultGuild(ulong guildId)
         {

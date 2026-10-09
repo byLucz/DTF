@@ -32,6 +32,10 @@ namespace DiscordTelegramFrontier
         private Task _receiver;
         private volatile bool _subscribed;
         private volatile bool _disposed;
+        private static readonly TimeSpan PollingReportInterval = TimeSpan.FromMinutes(10);
+        private readonly object _pollingLock = new();
+        private DateTimeOffset _pollingReportedAt = DateTimeOffset.MinValue;
+        private int _pollingSuppressed;
 
         public UpdateType[] AllowedUpdates => (_opts.AllowedUpdates is { Length: 0 }
                 ? Enum.GetValues<UpdateType>().Where(type => type != UpdateType.Unknown)
@@ -123,7 +127,14 @@ namespace DiscordTelegramFrontier
         }
 
         private async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken ct)
-            => await ProcessUpdateAsync(bot, update, ct).ConfigureAwait(false);
+        {
+            lock (_pollingLock)
+            {
+                _pollingReportedAt = DateTimeOffset.MinValue;
+                _pollingSuppressed = 0;
+            }
+            await ProcessUpdateAsync(bot, update, ct).ConfigureAwait(false);
+        }
 
         public async Task<bool> ProcessUpdateAsync(ITelegramBotClient bot, Update update,
             CancellationToken cancellationToken = default, string botUsername = null)
@@ -195,6 +206,8 @@ namespace DiscordTelegramFrontier
                     text = text.Remove(mention, end - mention);
                 }
             }
+            else if (!_opts.AcceptsPlainCommand(msg.Chat))
+                return false;
             if (string.IsNullOrWhiteSpace(text)) return false;
 
             if (!_opts.ChatToGuild.TryGetValue(msg.Chat.Id, out var guildId))
@@ -273,8 +286,25 @@ namespace DiscordTelegramFrontier
 
         private Task HandleErrorAsync(ITelegramBotClient bot, Exception ex, CancellationToken ct)
         {
-            if (!(ex is OperationCanceledException && ct.IsCancellationRequested))
-                ReportError(ex);
+            if (ex is OperationCanceledException && ct.IsCancellationRequested)
+                return Task.CompletedTask;
+
+            int suppressed;
+            lock (_pollingLock)
+            {
+                var now = DateTimeOffset.UtcNow;
+                if (now - _pollingReportedAt < PollingReportInterval)
+                {
+                    _pollingSuppressed++;
+                    return Task.CompletedTask;
+                }
+                _pollingReportedAt = now;
+                suppressed = _pollingSuppressed;
+                _pollingSuppressed = 0;
+            }
+
+            ReportError(suppressed == 0 ? ex
+                : new InvalidOperationException($"Telegram polling error, {suppressed} similar errors suppressed", ex));
             return Task.CompletedTask;
         }
 
