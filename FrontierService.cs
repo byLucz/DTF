@@ -9,7 +9,6 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Telegram.Bot;
-using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 
@@ -33,6 +32,8 @@ namespace DiscordTelegramFrontier
         private volatile bool _subscribed;
         private volatile bool _disposed;
         private static readonly TimeSpan PollingReportInterval = TimeSpan.FromMinutes(10);
+        private static readonly TimeSpan PollingRetryDelay = TimeSpan.FromSeconds(5);
+        private const int PollingTimeoutSeconds = 50;
         private readonly object _pollingLock = new();
         private DateTimeOffset _pollingReportedAt = DateTimeOffset.MinValue;
         private int _pollingSuppressed;
@@ -73,8 +74,7 @@ namespace DiscordTelegramFrontier
                     _cts = new CancellationTokenSource();
                 }
                 await GetBotUsernameAsync(_tg, _cts.Token).ConfigureAwait(false);
-                _receiver = _tg.ReceiveAsync(HandleUpdateAsync, HandleErrorAsync,
-                    new ReceiverOptions { AllowedUpdates = AllowedUpdates }, _cts.Token);
+                _receiver = PollAsync(_tg, _cts.Token);
             }
             finally
             {
@@ -126,14 +126,44 @@ namespace DiscordTelegramFrontier
             }
         }
 
-        private async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken ct)
+        private async Task PollAsync(ITelegramBotClient bot, CancellationToken ct)
         {
-            lock (_pollingLock)
+            var offset = 0;
+            var allowed = AllowedUpdates;
+
+            while (!ct.IsCancellationRequested)
             {
-                _pollingReportedAt = DateTimeOffset.MinValue;
-                _pollingSuppressed = 0;
+                Update[] updates;
+                try
+                {
+                    updates = await bot.GetUpdates(offset, 100, PollingTimeoutSeconds, allowed, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    await HandleErrorAsync(bot, ex, ct).ConfigureAwait(false);
+                    try { await Task.Delay(PollingRetryDelay, ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { return; }
+                    continue;
+                }
+
+                lock (_pollingLock)
+                {
+                    _pollingReportedAt = DateTimeOffset.MinValue;
+                    _pollingSuppressed = 0;
+                }
+
+                foreach (var update in updates)
+                {
+                    offset = update.Id + 1;
+                    try { await ProcessUpdateAsync(bot, update, ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+                    catch (Exception ex) { ReportError(ex); }
+                }
             }
-            await ProcessUpdateAsync(bot, update, ct).ConfigureAwait(false);
         }
 
         public async Task<bool> ProcessUpdateAsync(ITelegramBotClient bot, Update update,
