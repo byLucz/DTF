@@ -1,16 +1,16 @@
+using Discord;
+using Discord.Rest;
+using Discord.WebSocket;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using Discord;
-using Discord.Rest;
-using Discord.WebSocket;
 using Telegram.Bot;
+using Telegram.Bot.Exceptions;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
-using Telegram.Bot.Exceptions;
 
 namespace DiscordTelegramFrontier
 {

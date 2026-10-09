@@ -1,9 +1,9 @@
+using Discord.Commands;
+using Discord.WebSocket;
 using System;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
-using Discord.Commands;
-using Discord.WebSocket;
 
 namespace DiscordTelegramFrontier
 {

@@ -1,9 +1,9 @@
-using System;
-using System.Linq;
 using Discord.Commands;
 using Discord.WebSocket;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using System;
+using System.Linq;
 using Telegram.Bot;
 using Telegram.Bot.Types.Enums;
 
