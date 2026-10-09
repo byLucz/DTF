@@ -41,10 +41,23 @@ namespace DiscordTelegramFrontier
                 Append(embed.Author?.Name, TextStyle.Bold, embed.Author?.Url);
                 Append(embed.Title, TextStyle.Bold, embed.Url);
                 Append(embed.Description);
-                foreach (var field in embed.Fields)
+                foreach (var row in FieldRows(embed.Fields))
                 {
-                    Append(field.Name, TextStyle.Bold);
-                    Append(field.Value);
+                    if (row.Length > 1 && row.All(IsShort))
+                    {
+                        Append(string.Join(" / ", row.Select(field => $"**{field.Name.Trim()}** {field.Value.Trim()}")));
+                        continue;
+                    }
+                    foreach (var field in row)
+                    {
+                        if (field.Inline && IsShort(field))
+                        {
+                            Append($"**{field.Name.Trim()}** {field.Value.Trim()}");
+                            continue;
+                        }
+                        Append(field.Name, TextStyle.Bold);
+                        Append(field.Value);
+                    }
                 }
                 Append(embed.Footer?.Text, TextStyle.Italic);
             }
@@ -52,6 +65,30 @@ namespace DiscordTelegramFrontier
             var html = RenderHtml(blocks, image == null ? 4096 : 1024);
             return (html.Length == 0 && image == null ? "(empty)" : html, image);
         }
+
+        internal static IEnumerable<EmbedField[]> FieldRows(IEnumerable<EmbedField> fields)
+        {
+            var row = new List<EmbedField>();
+            foreach (var field in fields)
+            {
+                if (!field.Inline || row.Count == 3)
+                {
+                    if (row.Count > 0) yield return row.ToArray();
+                    row.Clear();
+                }
+                if (!field.Inline)
+                {
+                    yield return new[] { field };
+                    continue;
+                }
+                row.Add(field);
+            }
+            if (row.Count > 0) yield return row.ToArray();
+        }
+
+        private static bool IsShort(EmbedField field)
+            => !string.IsNullOrWhiteSpace(field.Value) && !field.Value.Contains('\n') && field.Value.Length <= 48
+                && !field.Name.Contains('\n') && !field.Value.Contains("```");
 
         private static string RenderHtml(IReadOnlyList<TextBlock> blocks, int limit)
         {
@@ -66,6 +103,7 @@ namespace DiscordTelegramFrontier
                 var quoting = false;
                 foreach (var run in block.Runs)
                 {
+                    if (run.EmojiId != null) continue;
                     var text = Take(run.Text, remaining);
                     if (text.Length == 0)
                     {

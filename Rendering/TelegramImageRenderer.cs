@@ -20,6 +20,11 @@ namespace DiscordTelegramFrontier
         private const float Padding = 40;
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
         private static readonly EmojiImageCache EmojiCache = new();
+        private static readonly EmojiImageCache PictureCache = new();
+        private const int MaxEmojiBytes = 512 * 1024;
+        private const int MaxPictureBytes = 8 * 1024 * 1024;
+        private const int MaxPictureSide = 4096;
+        private const float MaxThumbnailWidth = 240;
         private static readonly SemaphoreSlim Downloads = new(4, 4);
         private static readonly Regex Words = new(@"\r\n|\r|\n|[^\S\r\n]+|[^\s]+", RegexOptions.Compiled);
 
@@ -36,22 +41,41 @@ namespace DiscordTelegramFrontier
                 Add(embed.Author?.Name, 23, new SKColor(174, 188, 204), url: embed.Author?.Url);
                 Add(embed.Title, 36, SKColors.White, true, embed.Url);
                 Add(embed.Description, 30, new SKColor(231, 237, 244));
-                foreach (var field in embed.Fields)
+                foreach (var row in TelegramRenderer.FieldRows(embed.Fields))
                 {
-                    Add(field.Name, 25, SKColors.White, true);
-                    Add(field.Value, 28, new SKColor(214, 225, 236));
+                    if (row.Length == 1)
+                    {
+                        Add(row[0].Name, 25, SKColors.White, true);
+                        Add(row[0].Value, 28, new SKColor(214, 225, 236));
+                        continue;
+                    }
+
+                    var columns = row.Select(field =>
+                    {
+                        var column = new List<Block>();
+                        Add(field.Name, 25, SKColors.White, true, target: column);
+                        Add(field.Value, 28, new SKColor(214, 225, 236), target: column);
+                        return column;
+                    }).ToArray();
+                    blocks.Add(new Block(null, 0, accent, Columns: columns));
                 }
-                if (embed.Image?.Url is { } imageUrl) Add(imageUrl, 20, new SKColor(130, 177, 228));
-                else if (embed.Thumbnail?.Url is { } thumbnailUrl) Add(thumbnailUrl, 20, new SKColor(130, 177, 228));
+                if (DiscordMarkdown.IsLink(embed.Image?.Url)) blocks.Add(new Block(null, 0, accent, Picture: embed.Image.Value.Url));
+                else if (DiscordMarkdown.IsLink(embed.Thumbnail?.Url)) blocks.Add(new Block(null, 0, accent, Picture: embed.Thumbnail.Value.Url, Thumbnail: true));
                 Add(embed.Footer?.Text, 22, new SKColor(151, 168, 185));
 
             }
-            if (!blocks.Any(b => b.Content != null)) Add("(empty)", 30, SKColors.White);
-            var ids = blocks.Where(b => b.Content != null).SelectMany(b => b.Content.Runs)
+            if (!blocks.Any(b => b.Content != null || b.Columns != null)) Add("(empty)", 30, SKColors.White);
+            var ids = blocks.SelectMany(b => b.Columns?.SelectMany(column => column) ?? new[] { b })
+                .Where(b => b.Content != null).SelectMany(b => b.Content.Runs)
                 .Where(run => run.EmojiId != null && !run.Style.HasFlag(TextStyle.Spoiler))
                 .Select(run => run.EmojiId).Distinct().Take(100).ToArray();
-            var assets = await Task.WhenAll(ids.Select(id => DownloadEmojiAsync(id, cancellationToken))).ConfigureAwait(false);
+            var pictureUrls = blocks.Where(b => b.Picture != null).Select(b => b.Picture).Distinct().Take(4).ToArray();
+            var assets = await Task.WhenAll(ids.Select(id => DownloadAsync(EmojiCache, id,
+                $"https://cdn.discordapp.com/emojis/{id}.png?size=96", MaxEmojiBytes, cancellationToken))).ConfigureAwait(false);
+            var pictureAssets = await Task.WhenAll(pictureUrls.Select(url => DownloadAsync(PictureCache, url, url,
+                MaxPictureBytes, cancellationToken))).ConfigureAwait(false);
             var images = new Dictionary<string, SKBitmap>();
+            var pictures = new Dictionary<string, SKBitmap>();
             try
             {
                 for (var i = 0; i < ids.Length; i++)
@@ -63,6 +87,15 @@ namespace DiscordTelegramFrontier
                     var bitmap = SKBitmap.Decode(codec);
                     if (bitmap != null) images[ids[i]] = bitmap;
                 }
+                for (var i = 0; i < pictureUrls.Length; i++)
+                {
+                    if (pictureAssets[i] == null) continue;
+                    using var data = SKData.CreateCopy(pictureAssets[i]);
+                    using var codec = SKCodec.Create(data);
+                    if (codec == null || codec.Info.Width > MaxPictureSide || codec.Info.Height > MaxPictureSide) continue;
+                    var bitmap = SKBitmap.Decode(codec);
+                    if (bitmap != null) pictures[pictureUrls[i]] = bitmap;
+                }
                 cancellationToken.ThrowIfCancellationRequested();
                 using var recorder = new SKPictureRecorder();
                 using var fonts = new RenderFontCache();
@@ -71,6 +104,16 @@ namespace DiscordTelegramFrontier
                 foreach (var block in blocks)
                 {
                     if (y > MaxHeight - 120) break;
+                    if (block.Picture != null)
+                    {
+                        y = DrawPicture(canvas, block, pictures, fonts, y, cancellationToken) + 18;
+                        continue;
+                    }
+                    if (block.Columns != null)
+                    {
+                        y = DrawColumns(canvas, block, images, fonts, y, cancellationToken) + 18;
+                        continue;
+                    }
                     if (block.Content == null)
                     {
                         if (y > Padding) y += 16;
@@ -99,10 +142,10 @@ namespace DiscordTelegramFrontier
             }
             finally
             {
-                foreach (var bitmap in images.Values) bitmap.Dispose();
+                foreach (var bitmap in images.Values.Concat(pictures.Values)) bitmap.Dispose();
             }
 
-            void Add(string text, float size, SKColor foreground, bool bold = false, string url = null)
+            void Add(string text, float size, SKColor foreground, bool bold = false, string url = null, List<Block> target = null)
             {
                 if (string.IsNullOrWhiteSpace(text)) return;
                 foreach (var parsed in DiscordMarkdown.Parse(text))
@@ -115,17 +158,58 @@ namespace DiscordTelegramFrontier
                         }).ToArray()
                     };
                     var scale = parsed.Heading switch { 1 => 1.5f, 2 => 1.3f, 3 => 1.15f, _ => parsed.Small ? 0.8f : 1 };
-                    blocks.Add(new Block(content, size * scale, parsed.Small ? new SKColor(151, 168, 185) : foreground,
+                    (target ?? blocks).Add(new Block(content, size * scale, parsed.Small ? new SKColor(151, 168, 185) : foreground,
                         bold || parsed.Heading > 0));
                 }
             }
         }
 
-        private static float DrawBlock(SKCanvas canvas, Block block, IReadOnlyDictionary<string, SKBitmap> images,
+        private static float DrawPicture(SKCanvas canvas, Block block, IReadOnlyDictionary<string, SKBitmap> pictures,
             RenderFontCache fonts, float top, CancellationToken cancellationToken)
         {
+            if (!pictures.TryGetValue(block.Picture, out var bitmap))
+            {
+                var link = DiscordMarkdown.Parse(block.Picture).FirstOrDefault();
+                return link == null ? top : DrawBlock(canvas, new Block(link, 20, new SKColor(130, 177, 228)), pictures, fonts, top, cancellationToken);
+            }
+
+            var maxWidth = block.Thumbnail ? Math.Min(MaxThumbnailWidth, bitmap.Width * 2f) : Width - Padding * 2;
+            var maxHeight = MaxHeight - 120 - top;
+            var scale = Math.Min(maxWidth / bitmap.Width, maxHeight / bitmap.Height);
+            if (scale <= 0) return top;
+
+            var rect = new SKRect(Padding, top, Padding + bitmap.Width * scale, top + bitmap.Height * scale);
+            using var image = SKImage.FromBitmap(bitmap);
+            canvas.Save();
+            canvas.ClipRoundRect(new SKRoundRect(rect, 12), antialias: true);
+            canvas.DrawImage(image, rect, new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear));
+            canvas.Restore();
+            return rect.Bottom;
+        }
+
+        private static float DrawColumns(SKCanvas canvas, Block block, IReadOnlyDictionary<string, SKBitmap> images,
+            RenderFontCache fonts, float top, CancellationToken cancellationToken)
+        {
+            const float gap = 28;
+            var count = block.Columns.Length;
+            var width = (Width - Padding * 2 - gap * (count - 1)) / count;
+            var bottom = top;
+            for (var i = 0; i < count; i++)
+            {
+                var left = Padding + i * (width + gap);
+                var y = top;
+                foreach (var cell in block.Columns[i])
+                    y = DrawBlock(canvas, cell, images, fonts, y, cancellationToken, left, left + width) + 6;
+                bottom = Math.Max(bottom, y - 6);
+            }
+            return bottom;
+        }
+
+        private static float DrawBlock(SKCanvas canvas, Block block, IReadOnlyDictionary<string, SKBitmap> images,
+            RenderFontCache fonts, float top, CancellationToken cancellationToken, float start = Padding, float end = Width - Padding)
+        {
             var lineHeight = block.Size * 1.65f;
-            var left = Padding + (block.Content.Quote ? 22 : 0);
+            var left = start + (block.Content.Quote ? 22 : 0);
             var x = left;
             var y = top;
             for (var runIndex = 0; runIndex < block.Content.Runs.Count; runIndex++)
@@ -226,28 +310,28 @@ namespace DiscordTelegramFrontier
 
             void Wrap(float width)
             {
-                if (x > left && x + width > Width - Padding) NewLine();
+                if (x > left && x + width > end) NewLine();
             }
         }
 
-        private static async Task<byte[]> DownloadEmojiAsync(string id, CancellationToken ct)
+        private static async Task<byte[]> DownloadAsync(EmojiImageCache cache, string key, string url, int maxBytes, CancellationToken ct)
         {
-            if (EmojiCache.TryGet(id, out var cached)) return cached;
+            if (cache.TryGet(key, out var cached)) return cached;
             await Downloads.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                if (EmojiCache.TryGet(id, out cached)) return cached;
+                if (cache.TryGet(key, out cached)) return cached;
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeout.CancelAfter(TimeSpan.FromSeconds(10));
-                using var response = await Http.GetAsync($"https://cdn.discordapp.com/emojis/{id}.png?size=96", HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > 512 * 1024) return Remember(null);
+                using var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > maxBytes) return Remember(null);
                 using var input = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
                 using var output = new MemoryStream();
                 var buffer = new byte[8192];
                 int read;
                 while ((read = await input.ReadAsync(buffer, timeout.Token).ConfigureAwait(false)) != 0)
                 {
-                    if (output.Length + read > 512 * 1024) return Remember(null);
+                    if (output.Length + read > maxBytes) return Remember(null);
                     output.Write(buffer, 0, read);
                 }
                 return Remember(output.ToArray());
@@ -256,9 +340,10 @@ namespace DiscordTelegramFrontier
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return Remember(null); }
             finally { Downloads.Release(); }
 
-            byte[] Remember(byte[] bytes) => EmojiCache.Remember(id, bytes);
+            byte[] Remember(byte[] bytes) => cache.Remember(key, bytes);
         }
 
-        private sealed record Block(TextBlock Content, float Size, SKColor Color, bool Bold = false);
+        private sealed record Block(TextBlock Content, float Size, SKColor Color, bool Bold = false,
+            string Picture = null, bool Thumbnail = false, List<Block>[] Columns = null);
     }
 }
