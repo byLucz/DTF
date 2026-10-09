@@ -38,7 +38,7 @@ namespace DiscordTelegramFrontier
                 if (embed == null) continue;
                 var accent = embed.Color is { } color ? new SKColor(color.R, color.G, color.B) : new SKColor(91, 160, 238);
                 blocks.Add(new Block(null, 0, accent));
-                Add(embed.Author?.Name, 23, new SKColor(174, 188, 204), url: embed.Author?.Url);
+                Add(embed.Author?.Name, 23, new SKColor(174, 188, 204), url: embed.Author?.Url, icon: embed.Author?.IconUrl);
                 Add(embed.Title, 36, SKColors.White, true, embed.Url);
                 Add(embed.Description, 30, new SKColor(231, 237, 244));
                 foreach (var row in TelegramRenderer.FieldRows(embed.Fields))
@@ -61,7 +61,7 @@ namespace DiscordTelegramFrontier
                 }
                 if (DiscordMarkdown.IsLink(embed.Image?.Url)) blocks.Add(new Block(null, 0, accent, Picture: embed.Image.Value.Url));
                 else if (DiscordMarkdown.IsLink(embed.Thumbnail?.Url)) blocks.Add(new Block(null, 0, accent, Picture: embed.Thumbnail.Value.Url, Thumbnail: true));
-                Add(embed.Footer?.Text, 22, new SKColor(151, 168, 185));
+                Add(embed.Footer?.Text, 22, new SKColor(151, 168, 185), icon: embed.Footer?.IconUrl);
 
             }
             if (!blocks.Any(b => b.Content != null || b.Columns != null)) Add("(empty)", 30, SKColors.White);
@@ -69,7 +69,9 @@ namespace DiscordTelegramFrontier
                 .Where(b => b.Content != null).SelectMany(b => b.Content.Runs)
                 .Where(run => run.EmojiId != null && !run.Style.HasFlag(TextStyle.Spoiler))
                 .Select(run => run.EmojiId).Distinct().Take(100).ToArray();
-            var pictureUrls = blocks.Where(b => b.Picture != null).Select(b => b.Picture).Distinct().Take(4).ToArray();
+            var pictureUrls = blocks.Where(b => b.Picture != null).Select(b => b.Picture)
+                .Concat(blocks.Where(b => b.Icon != null).Select(b => b.Icon))
+                .Distinct().Take(6).ToArray();
             var assets = await Task.WhenAll(ids.Select(id => DownloadAsync(EmojiCache, id,
                 $"https://cdn.discordapp.com/emojis/{id}.png?size=96", MaxEmojiBytes, cancellationToken))).ConfigureAwait(false);
             var pictureAssets = await Task.WhenAll(pictureUrls.Select(url => DownloadAsync(PictureCache, url, url,
@@ -96,6 +98,8 @@ namespace DiscordTelegramFrontier
                     var bitmap = SKBitmap.Decode(codec);
                     if (bitmap != null) pictures[pictureUrls[i]] = bitmap;
                 }
+                foreach (var (url, bitmap) in pictures)
+                    images[url] = bitmap;
                 cancellationToken.ThrowIfCancellationRequested();
                 using var recorder = new SKPictureRecorder();
                 using var fonts = new RenderFontCache();
@@ -142,11 +146,13 @@ namespace DiscordTelegramFrontier
             }
             finally
             {
-                foreach (var bitmap in images.Values.Concat(pictures.Values)) bitmap.Dispose();
+                foreach (var bitmap in images.Values.Concat(pictures.Values).Distinct()) bitmap.Dispose();
             }
 
-            void Add(string text, float size, SKColor foreground, bool bold = false, string url = null, List<Block> target = null)
+            void Add(string text, float size, SKColor foreground, bool bold = false, string url = null, List<Block> target = null,
+                string icon = null)
             {
+                if (!DiscordMarkdown.IsLink(icon)) icon = null;
                 if (string.IsNullOrWhiteSpace(text)) return;
                 foreach (var parsed in DiscordMarkdown.Parse(text))
                 {
@@ -159,7 +165,8 @@ namespace DiscordTelegramFrontier
                     };
                     var scale = parsed.Heading switch { 1 => 1.5f, 2 => 1.3f, 3 => 1.15f, _ => parsed.Small ? 0.8f : 1 };
                     (target ?? blocks).Add(new Block(content, size * scale, parsed.Small ? new SKColor(151, 168, 185) : foreground,
-                        bold || parsed.Heading > 0));
+                        bold || parsed.Heading > 0, Icon: icon));
+                    icon = null;
                 }
             }
         }
@@ -212,6 +219,17 @@ namespace DiscordTelegramFrontier
             var left = start + (block.Content.Quote ? 22 : 0);
             var x = left;
             var y = top;
+            if (block.Icon != null && images.TryGetValue(block.Icon, out var icon))
+            {
+                var size = block.Size * 1.3f;
+                var rect = new SKRect(x, y + (lineHeight - size) / 2, x + size, y + (lineHeight + size) / 2);
+                using var iconImage = SKImage.FromBitmap(icon);
+                canvas.Save();
+                canvas.ClipRoundRect(new SKRoundRect(rect, size / 2), antialias: true);
+                canvas.DrawImage(iconImage, rect, new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear));
+                canvas.Restore();
+                x += size + 10;
+            }
             for (var runIndex = 0; runIndex < block.Content.Runs.Count; runIndex++)
             {
                 var run = block.Content.Runs[runIndex];
@@ -344,6 +362,6 @@ namespace DiscordTelegramFrontier
         }
 
         private sealed record Block(TextBlock Content, float Size, SKColor Color, bool Bold = false,
-            string Picture = null, bool Thumbnail = false, List<Block>[] Columns = null);
+            string Picture = null, bool Thumbnail = false, List<Block>[] Columns = null, string Icon = null);
     }
 }
