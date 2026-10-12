@@ -11,6 +11,7 @@ using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using Telegram.Bot.Types.ReplyMarkups;
 
 namespace DiscordTelegramFrontier
 {
@@ -36,13 +37,33 @@ namespace DiscordTelegramFrontier
             _renderAsImage = renderAsImage;
         }
 
-        private async Task<FrontierProxyMessage> SendCoreAsync(string text, Embed embed, Embed[] embeds, RequestOptions options)
+        internal FrontierButtons Buttons { get; private set; }
+        internal bool ButtonsEnabled => Buttons != null;
+        internal long ChatId => _chatId;
+
+        internal void EnableButtons(FrontierButtons buttons) => Buttons = buttons;
+
+        internal InlineKeyboardMarkup BuildMarkup(FrontierProxyMessage message, MessageComponent components)
+            => Buttons?.Build(message, components);
+
+        private async Task<FrontierProxyMessage> SendCoreAsync(string text, Embed embed, Embed[] embeds, MessageComponent components,
+            RequestOptions options)
         {
             var allEmbeds = TelegramRenderer.CombineEmbeds(embed, embeds);
             var ct = options?.CancelToken ?? default;
-            var rendered = await RenderAsync(text, allEmbeds, ct).ConfigureAwait(false);
-            var sent = await SendRenderedAsync(rendered, ct).ConfigureAwait(false);
-            var message = new FrontierProxyMessage(this, sent.Id, text, allEmbeds, _author, rendered);
+            var message = new FrontierProxyMessage(this, text, allEmbeds, _author);
+            var markup = BuildMarkup(message, components);
+            try
+            {
+                var rendered = await RenderAsync(text, allEmbeds, ct).ConfigureAwait(false);
+                var sent = await SendRenderedAsync(rendered, markup, ct).ConfigureAwait(false);
+                message.Bind(sent.Id, rendered, components, markup);
+            }
+            catch
+            {
+                Buttons?.Release(message.Id);
+                throw;
+            }
             _messages[message.Id] = message;
             return message;
         }
@@ -55,26 +76,26 @@ namespace DiscordTelegramFrontier
             return new TelegramRenderedMessage(rendered.text, rendered.image);
         }
 
-        private async Task<Message> SendRenderedAsync(TelegramRenderedMessage rendered, CancellationToken ct)
+        private async Task<Message> SendRenderedAsync(TelegramRenderedMessage rendered, InlineKeyboardMarkup markup, CancellationToken ct)
         {
             if (rendered.Png != null)
             {
                 using var stream = new MemoryStream(rendered.Png, false);
-                return await _tg.SendPhoto(_chatId, InputFile.FromStream(stream, "message.png"), messageThreadId: _messageThreadId,
-                    businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
+                return await _tg.SendPhoto(_chatId, InputFile.FromStream(stream, "message.png"), replyMarkup: markup,
+                    messageThreadId: _messageThreadId, businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
             }
             if (rendered.ImageUrl == null)
-                return await SendTextAsync(rendered.Text, ct).ConfigureAwait(false);
+                return await SendTextAsync(rendered.Text, markup, ct).ConfigureAwait(false);
 
             try
             {
                 var media = InputFile.FromUri(rendered.ImageUrl);
                 return IsAnimation(rendered.ImageUrl)
                     ? await _tg.SendAnimation(_chatId, media, caption: rendered.Text, parseMode: ParseMode.Html,
-                        messageThreadId: _messageThreadId, businessConnectionId: _businessConnectionId,
+                        replyMarkup: markup, messageThreadId: _messageThreadId, businessConnectionId: _businessConnectionId,
                         cancellationToken: ct).ConfigureAwait(false)
                     : await _tg.SendPhoto(_chatId, media, caption: rendered.Text, parseMode: ParseMode.Html,
-                        messageThreadId: _messageThreadId, businessConnectionId: _businessConnectionId,
+                        replyMarkup: markup, messageThreadId: _messageThreadId, businessConnectionId: _businessConnectionId,
                         cancellationToken: ct).ConfigureAwait(false);
             }
             catch (ApiRequestException)
@@ -83,12 +104,12 @@ namespace DiscordTelegramFrontier
                 var text = string.IsNullOrWhiteSpace(rendered.Text) || rendered.Text == "(empty)"
                     ? link
                     : rendered.Text + "\n" + link;
-                return await SendTextAsync(text, ct).ConfigureAwait(false);
+                return await SendTextAsync(text, markup, ct).ConfigureAwait(false);
             }
         }
 
-        private Task<Message> SendTextAsync(string text, CancellationToken ct)
-            => _tg.SendMessage(_chatId, text, parseMode: ParseMode.Html, messageThreadId: _messageThreadId,
+        private Task<Message> SendTextAsync(string text, InlineKeyboardMarkup markup, CancellationToken ct)
+            => _tg.SendMessage(_chatId, text, parseMode: ParseMode.Html, replyMarkup: markup, messageThreadId: _messageThreadId,
                 businessConnectionId: _businessConnectionId, cancellationToken: ct);
 
         private static bool IsAnimation(string url)
@@ -102,15 +123,29 @@ namespace DiscordTelegramFrontier
                 || path.EndsWith(".webm", StringComparison.OrdinalIgnoreCase);
         }
 
-        internal async Task<int> EditAsync(int messageId, TelegramRenderedMessage previous,
-            TelegramRenderedMessage next, CancellationToken ct)
+        internal async Task<int> EditAsync(int messageId, TelegramRenderedMessage previous, TelegramRenderedMessage next,
+            InlineKeyboardMarkup previousMarkup, InlineKeyboardMarkup nextMarkup, CancellationToken ct)
         {
             if (previous.HasSameContent(next))
+            {
+                if (ReferenceEquals(previousMarkup, nextMarkup))
+                    return messageId;
+
+                try
+                {
+                    await _tg.EditMessageReplyMarkup(_chatId, messageId, nextMarkup,
+                        businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
+                }
+                catch (ApiRequestException ex) when (ex.ErrorCode == 400 &&
+                    ex.Message.Contains("message is not modified", StringComparison.OrdinalIgnoreCase))
+                {
+                }
                 return messageId;
+            }
 
             if (previous.IsPhoto && !next.IsPhoto)
             {
-                var replacement = await SendRenderedAsync(next, ct).ConfigureAwait(false);
+                var replacement = await SendRenderedAsync(next, nextMarkup, ct).ConfigureAwait(false);
                 try
                 {
                     await DeleteAsync(messageId, ct).ConfigureAwait(false);
@@ -137,21 +172,21 @@ namespace DiscordTelegramFrontier
                 {
                     using var stream = new MemoryStream(next.Png, false);
                     await _tg.EditMessageMedia(_chatId, messageId,
-                        new InputMediaPhoto(InputFile.FromStream(stream, "message.png")),
+                        new InputMediaPhoto(InputFile.FromStream(stream, "message.png")), replyMarkup: nextMarkup,
                         businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
                 }
                 else if (next.ImageUrl == null)
-                    await _tg.EditMessageText(_chatId, messageId, next.Text, parseMode: ParseMode.Html,
+                    await _tg.EditMessageText(_chatId, messageId, next.Text, parseMode: ParseMode.Html, replyMarkup: nextMarkup,
                         businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
-                else if (previous.ImageUrl == next.ImageUrl && previous.Png == null)
-                    await _tg.EditMessageCaption(_chatId, messageId, caption: next.Text, parseMode: ParseMode.Html,
+                else if (previous.ImageUrl == next.ImageUrl && previous.PngHash == null)
+                    await _tg.EditMessageCaption(_chatId, messageId, caption: next.Text, parseMode: ParseMode.Html, replyMarkup: nextMarkup,
                         businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
                 else
                     await _tg.EditMessageMedia(_chatId, messageId, new InputMediaPhoto(InputFile.FromUri(next.ImageUrl))
                     {
                         Caption = next.Text,
                         ParseMode = ParseMode.Html
-                    }, businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
+                    }, replyMarkup: nextMarkup, businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
             }
             catch (ApiRequestException ex) when (ex.ErrorCode == 400 &&
                 ex.Message.Contains("message is not modified", StringComparison.OrdinalIgnoreCase))
@@ -175,7 +210,7 @@ namespace DiscordTelegramFrontier
 
         public async Task<RestUserMessage> SendMessageAsync(string text = null, bool isTTS = false, Embed embed = null, RequestOptions options = null, AllowedMentions allowedMentions = null, MessageReference messageReference = null, MessageComponent components = null, ISticker[] stickers = null, Embed[] embeds = null, MessageFlags flags = MessageFlags.None, PollProperties poll = null)
         {
-            await SendCoreAsync(text, embed, embeds, options).ConfigureAwait(false);
+            await SendCoreAsync(text, embed, embeds, components, options).ConfigureAwait(false);
             return null;
         }
 
@@ -244,7 +279,7 @@ namespace DiscordTelegramFrontier
 
         async Task<IUserMessage> IMessageChannel.SendMessageAsync(string text, bool isTTS, Embed embed, RequestOptions options, AllowedMentions allowedMentions, MessageReference messageReference, MessageComponent components, ISticker[] stickers, Embed[] embeds, MessageFlags flags, PollProperties poll)
         {
-            return await SendCoreAsync(text, embed, embeds, options).ConfigureAwait(false);
+            return await SendCoreAsync(text, embed, embeds, components, options).ConfigureAwait(false);
         }
 
         Task<IUserMessage> IMessageChannel.SendFileAsync(string filePath, string text, bool isTTS, Embed embed, RequestOptions options, bool isSpoiler, AllowedMentions allowedMentions, MessageReference messageReference, MessageComponent components, ISticker[] stickers, Embed[] embeds, MessageFlags flags, PollProperties poll)

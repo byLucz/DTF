@@ -1,4 +1,5 @@
 using Discord.Commands;
+using Discord.Interactions;
 using Discord.WebSocket;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -62,6 +63,7 @@ namespace DiscordTelegramFrontier
         private static void AddService(IServiceCollection services)
             => services.TryAddSingleton(provider => new FrontierService(
                 provider.GetService<DiscordSocketClient>(), provider.GetService<CommandService>(), provider,
-                provider.GetRequiredService<FrontierOptions>(), provider.GetService<ITelegramBotClient>()));
+                provider.GetRequiredService<FrontierOptions>(), provider.GetService<ITelegramBotClient>(),
+                provider.GetService<InteractionService>()));
     }
 }

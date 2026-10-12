@@ -1,5 +1,6 @@
 using Discord;
 using Discord.Commands;
+using Discord.Interactions;
 using Discord.WebSocket;
 using Microsoft.Extensions.DependencyInjection;
 using System;
@@ -21,6 +22,8 @@ namespace DiscordTelegramFrontier
         private readonly IServiceProvider _services;
         private readonly FrontierOptions _opts;
         private readonly FrontierUpdatePipeline _pipeline;
+        private readonly InteractionService _interactions;
+        private readonly FrontierButtons _buttons;
 
         private ITelegramBotClient _tg;
         private CancellationTokenSource _cts;
@@ -42,16 +45,32 @@ namespace DiscordTelegramFrontier
                 ? Enum.GetValues<UpdateType>().Where(type => type != UpdateType.Unknown)
                 : _opts.AllowedUpdates ?? new[] { UpdateType.Message })
             .Concat(_pipeline.UpdateTypes)
+            .Concat(ButtonsAvailable ? new[] { UpdateType.CallbackQuery } : Array.Empty<UpdateType>())
             .Distinct().ToArray();
 
+        private bool ButtonsAvailable => _opts.EnableDiscordCommands && _interactions != null;
+
+        public ITelegramBotClient Bot
+        {
+            get
+            {
+                if (_tg != null || string.IsNullOrWhiteSpace(_opts.TelegramToken))
+                    return _tg;
+                lock (_stopLock)
+                    return _tg ??= new TelegramBotClient(new TelegramBotClientOptions(_opts.TelegramToken) { RetryCount = _opts.RetryCount });
+            }
+        }
+
         public FrontierService(DiscordSocketClient discord, CommandService commands, IServiceProvider services, FrontierOptions opts,
-            ITelegramBotClient telegramClient = null)
+            ITelegramBotClient telegramClient = null, InteractionService interactions = null)
         {
             _discord = discord;
             _commands = commands;
             _services = services;
             _opts = opts;
             _tg = telegramClient;
+            _interactions = interactions;
+            _buttons = new FrontierButtons(opts.ButtonLifetime);
             _pipeline = new FrontierUpdatePipeline(services, DispatchTerminalAsync);
         }
 
@@ -67,14 +86,14 @@ namespace DiscordTelegramFrontier
                 if (_receiver != null && !_receiver.IsCompleted)
                     return;
                 EnsureDiscordBridge();
-                _tg ??= new TelegramBotClient(_opts.TelegramToken);
+                var bot = Bot;
                 lock (_stopLock)
                 {
                     _cts?.Dispose();
                     _cts = new CancellationTokenSource();
                 }
-                await GetBotUsernameAsync(_tg, _cts.Token).ConfigureAwait(false);
-                _receiver = PollAsync(_tg, _cts.Token);
+                await GetBotUsernameAsync(bot, _cts.Token).ConfigureAwait(false);
+                _receiver = PollAsync(bot, _cts.Token);
             }
             finally
             {
@@ -118,9 +137,11 @@ namespace DiscordTelegramFrontier
             try { await StopAsync().ConfigureAwait(false); }
             finally
             {
+                _buttons.Dispose();
                 lock (_stopLock)
                 {
                     if (_subscribed) _commands.CommandExecuted -= HandleCommandExecutedAsync;
+                    if (_subscribed && _interactions != null) _interactions.InteractionExecuted -= HandleInteractionExecutedAsync;
                     _subscribed = false;
                 }
             }
@@ -211,7 +232,11 @@ namespace DiscordTelegramFrontier
             context.CancellationToken.ThrowIfCancellationRequested();
             if (_opts.UpdateHandler != null && await _opts.UpdateHandler(context.Bot, context.Update, context.BotUsername, context.CancellationToken).ConfigureAwait(false))
                 return true;
-            return _opts.EnableDiscordCommands && await ExecuteDiscordCommandAsync(context).ConfigureAwait(false);
+            if (!_opts.EnableDiscordCommands)
+                return false;
+            return context.CallbackQuery != null
+                ? await ExecuteDiscordComponentAsync(context).ConfigureAwait(false)
+                : await ExecuteDiscordCommandAsync(context).ConfigureAwait(false);
         }
 
         private async Task<bool> ExecuteDiscordCommandAsync(FrontierUpdateContext telegram)
@@ -268,7 +293,7 @@ namespace DiscordTelegramFrontier
                 await ReportFailureAsync(context, validation).ConfigureAwait(false);
                 return true;
             }
-            if (selection.Pipeline is not ParseResult parsed || !parsed.IsSuccess)
+            if (selection.Pipeline is not Discord.Commands.ParseResult parsed || !parsed.IsSuccess)
             {
                 await ReportFailureAsync(context, selection.Pipeline).ConfigureAwait(false);
                 return true;
@@ -276,6 +301,8 @@ namespace DiscordTelegramFrontier
 
             var command = selection.Match.Value.Command;
             channel.SetRenderMode(command.Attributes.Any(a => a is FrontierAsImageAttribute));
+            if (ButtonsAvailable && command.Attributes.Any(a => a is FrontierAttribute { Buttons: true } or FrontierAsImageAttribute { Buttons: true }))
+                channel.EnableButtons(_buttons);
             var result = await command.ExecuteAsync(context, parsed, _services).ConfigureAwait(false);
             await ReportFailureAsync(context, result).ConfigureAwait(false);
             return true;
@@ -293,6 +320,7 @@ namespace DiscordTelegramFrontier
                 if (_subscribed) return;
                 DiscordContextFactory.Validate();
                 _commands.CommandExecuted += HandleCommandExecutedAsync;
+                if (_interactions != null) _interactions.InteractionExecuted += HandleInteractionExecutedAsync;
                 _subscribed = true;
             }
         }
@@ -338,10 +366,86 @@ namespace DiscordTelegramFrontier
             return Task.CompletedTask;
         }
 
-        private Task HandleCommandExecutedAsync(Optional<CommandInfo> command, ICommandContext context, IResult result)
+        private Task HandleCommandExecutedAsync(Optional<CommandInfo> command, ICommandContext context, Discord.Commands.IResult result)
             => ReportFailureAsync(context, result);
 
-        private async Task ReportFailureAsync(ICommandContext context, IResult result)
+        private async Task<bool> ExecuteDiscordComponentAsync(FrontierUpdateContext telegram)
+        {
+            var callback = telegram.CallbackQuery;
+            if (_interactions == null || callback.Data is not { } data || !data.StartsWith(FrontierButtons.Prefix, StringComparison.Ordinal))
+                return false;
+
+            var bot = telegram.Bot;
+            var ct = telegram.CancellationToken;
+
+            if (!_buttons.TryGet(data, out var entry) || callback.Message is not { } source
+                || entry.Message.ProxyChannel.ChatId != source.Chat.Id || !entry.Message.ProxyChannel.UsesClient(bot))
+            {
+                await bot.AnswerCallbackQuery(callback.Id, data == FrontierButtons.Prefix ? null : "Кнопка устарела, вызови команду заново.",
+                    cancellationToken: ct).ConfigureAwait(false);
+                return true;
+            }
+
+            if (!_opts.ChatToGuild.TryGetValue(source.Chat.Id, out var guildId))
+                guildId = _opts.DefaultGuildId;
+
+            var guild = guildId != 0 ? _discord.GetGuild(guildId) : null;
+            IUser user = guild is not null && _opts.UserToDiscord.TryGetValue(callback.From.Id, out var discordId)
+                ? guild.GetUser(discordId)
+                : null;
+            user ??= FrontierUsers.Proxy(callback.From, callback.From.Username);
+
+            var interaction = new FrontierComponentInteraction(entry.Message,
+                new FrontierComponentData(entry.CustomId, entry.Type, entry.Values), user, guild,
+                _discord.CurrentUser?.Id ?? 0, callback.From.LanguageCode,
+                (text, alert) => bot.AnswerCallbackQuery(callback.Id, text, alert, cancellationToken: ct));
+            var context = new FrontierInteractionContext(_discord, guild, entry.Message.ProxyChannel, user, interaction);
+
+            Discord.Interactions.IResult result;
+            try
+            {
+                result = await _interactions.ExecuteCommandAsync(context, _services).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                result = Discord.Interactions.ExecuteResult.FromError(ex);
+            }
+
+            if (!result.IsSuccess)
+                await FinishInteractionAsync(context, result).ConfigureAwait(false);
+            return true;
+        }
+
+        private Task HandleInteractionExecutedAsync(ICommandInfo command, IInteractionContext context, Discord.Interactions.IResult result)
+            => context is FrontierInteractionContext frontier ? FinishInteractionAsync(frontier, result) : Task.CompletedTask;
+
+        private async Task FinishInteractionAsync(FrontierInteractionContext context, Discord.Interactions.IResult result)
+        {
+            if (!context.TryFinish())
+                return;
+
+            var userError = result.Error is InteractionCommandError.UnknownCommand or InteractionCommandError.UnmetPrecondition
+                or InteractionCommandError.ConvertFailed or InteractionCommandError.BadArgs or InteractionCommandError.ParseFailed;
+            if (!result.IsSuccess && !userError)
+                ReportError(result is Discord.Interactions.ExecuteResult { Exception: { } exception }
+                    ? exception : new InvalidOperationException(result.ErrorReason));
+
+            try
+            {
+                if (result.IsSuccess || context.Interaction.HasResponded)
+                    await context.Interaction.AnswerAsync().ConfigureAwait(false);
+                else
+                    await context.Interaction.AnswerAsync(result.Error switch
+                    {
+                        InteractionCommandError.UnknownCommand => "Эта кнопка не работает в Telegram.",
+                        InteractionCommandError.UnmetPrecondition when !string.IsNullOrWhiteSpace(result.ErrorReason) => result.ErrorReason,
+                        _ => "Не удалось выполнить действие."
+                    }, alert: true).ConfigureAwait(false);
+            }
+            catch (Exception ex) { ReportError(ex); }
+        }
+
+        private async Task ReportFailureAsync(ICommandContext context, Discord.Commands.IResult result)
         {
             if (result.IsSuccess || context.Channel is not FrontierProxyChannel channel || !_failures.TryGetValue(context, out var failure))
                 return;
@@ -351,7 +455,7 @@ namespace DiscordTelegramFrontier
                 or CommandError.BadArgCount or CommandError.UnmetPrecondition
                 && !string.IsNullOrWhiteSpace(result.ErrorReason);
             if (!userError)
-                ReportError(result is ExecuteResult execution && execution.Exception != null
+                ReportError(result is Discord.Commands.ExecuteResult execution && execution.Exception != null
                     ? execution.Exception : new InvalidOperationException(result.ErrorReason));
             var reply = userError ? result.ErrorReason : "Не удалось выполнить команду.";
             try

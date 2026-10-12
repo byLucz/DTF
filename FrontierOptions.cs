@@ -18,6 +18,8 @@ namespace DiscordTelegramFrontier
         public Func<ITelegramBotClient, Update, string, CancellationToken, Task<bool>> UpdateHandler { get; set; }
         public Func<FrontierUpdateContext, Exception, Task> UpdateErrorHandler { get; set; }
         public UpdateType[] AllowedUpdates { get; set; } = new[] { UpdateType.Message };
+        public TimeSpan ButtonLifetime { get; set; } = TimeSpan.FromHours(1);
+        public ushort RetryCount { get; set; } = 3;
 
         public Dictionary<long, ulong> ChatToGuild { get; } = new();
         public Dictionary<long, ulong> UserToDiscord { get; } = new();

@@ -5,5 +5,6 @@ namespace DiscordTelegramFrontier
     [AttributeUsage(AttributeTargets.Method, AllowMultiple = false)]
     public sealed class FrontierAsImageAttribute : Attribute
     {
+        public bool Buttons { get; set; }
     }
 }
