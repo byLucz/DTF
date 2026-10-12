@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Telegram.Bot.Types.ReplyMarkups;
 
 namespace DiscordTelegramFrontier
 {
@@ -12,20 +13,37 @@ namespace DiscordTelegramFrontier
         private string _content;
         private Embed[] _embeds;
         private TelegramRenderedMessage _rendered;
+        private MessageComponent _components;
+        private InlineKeyboardMarkup _markup;
+        private string _signature = "";
         private readonly IUser _author;
         private readonly SemaphoreSlim _gate = new(1, 1);
         private bool _deleted;
 
-        internal FrontierProxyMessage(FrontierProxyChannel channel, int telegramMessageId, string content,
-            Embed[] embeds, IUser author, TelegramRenderedMessage rendered)
+        private static long _nextId;
+
+        internal FrontierProxyMessage(FrontierProxyChannel channel, string content, Embed[] embeds, IUser author)
         {
             _channel = channel;
             _content = content ?? "";
             _embeds = embeds;
             _author = author;
-            _rendered = rendered;
+            Id = NextId();
+        }
+
+        internal static ulong NextId() => (1UL << 63) | (ulong)Interlocked.Increment(ref _nextId);
+
+        internal FrontierProxyChannel ProxyChannel => _channel;
+        internal InlineKeyboardMarkup Markup => _markup;
+
+        internal void Bind(int telegramMessageId, TelegramRenderedMessage rendered, MessageComponent components,
+            InlineKeyboardMarkup markup)
+        {
             TelegramMessageId = telegramMessageId;
-            Id = (ulong)telegramMessageId;
+            _rendered = rendered.Detach();
+            _components = markup == null ? null : components;
+            _markup = markup;
+            _signature = markup == null ? "" : FrontierButtons.Signature(components);
         }
 
         public ulong Id { get; }
@@ -56,7 +74,7 @@ namespace DiscordTelegramFrontier
         public MessageApplication Application => null;
         public MessageReference Reference => null;
         public IReadOnlyDictionary<IEmote, ReactionMetadata> Reactions => new Dictionary<IEmote, ReactionMetadata>();
-        public IReadOnlyCollection<IMessageComponent> Components => Array.Empty<IMessageComponent>();
+        public IReadOnlyCollection<IMessageComponent> Components => _components?.Components ?? Array.Empty<IMessageComponent>();
         public IReadOnlyCollection<IStickerItem> Stickers => Array.Empty<IStickerItem>();
         public MessageFlags? Flags => null;
 
@@ -83,19 +101,27 @@ namespace DiscordTelegramFrontier
 
                 var properties = new MessageProperties();
                 func(properties);
-                if (properties.Attachments.IsSpecified || properties.Components.IsSpecified || properties.Flags.IsSpecified)
-                    throw new NotSupportedException("DTF supports editing Content, Embed and Embeds; attachments, components and flags are not supported.");
+                if (properties.Attachments.IsSpecified || properties.Flags.IsSpecified)
+                    throw new NotSupportedException("DTF supports editing Content, Embed, Embeds and Components; attachments and flags are not supported.");
                 var content = properties.Content.IsSpecified ? properties.Content.Value ?? "" : _content;
                 var embeds = properties.Embed.IsSpecified || properties.Embeds.IsSpecified
                     ? TelegramRenderer.CombineEmbeds(properties.Embed.GetValueOrDefault(), properties.Embeds.GetValueOrDefault())
                     : _embeds;
+                var components = properties.Components.IsSpecified ? properties.Components.Value : _components;
+                var signature = _channel.ButtonsEnabled ? FrontierButtons.Signature(components) : "";
+                if (content == _content && signature == _signature && SameEmbeds(embeds, _embeds))
+                    return;
+                var markup = signature == _signature ? _markup : _channel.BuildMarkup(this, components);
                 var rendered = await _channel.RenderAsync(content, embeds, ct).ConfigureAwait(false);
-                var messageId = await _channel.EditAsync(TelegramMessageId, _rendered, rendered, ct).ConfigureAwait(false);
+                var messageId = await _channel.EditAsync(TelegramMessageId, _rendered, rendered, _markup, markup, ct).ConfigureAwait(false);
 
                 TelegramMessageId = messageId;
                 _content = content;
                 _embeds = embeds;
-                _rendered = rendered;
+                _rendered = rendered.Detach();
+                _components = markup == null ? null : components;
+                _markup = markup;
+                _signature = markup == null ? "" : signature;
                 EditedTimestamp = DateTimeOffset.UtcNow;
             }
             finally
@@ -103,6 +129,16 @@ namespace DiscordTelegramFrontier
                 _gate.Release();
             }
         }
+        private static bool SameEmbeds(Embed[] left, Embed[] right)
+        {
+            if (left.Length != right.Length)
+                return false;
+            for (var i = 0; i < left.Length; i++)
+                if (!ReferenceEquals(left[i], right[i]))
+                    return false;
+            return true;
+        }
+
         public Task PinAsync(RequestOptions options = null) => throw new NotSupportedException();
         public Task UnpinAsync(RequestOptions options = null) => throw new NotSupportedException();
         public Task CrosspostAsync(RequestOptions options = null) => throw new NotSupportedException();
@@ -127,6 +163,7 @@ namespace DiscordTelegramFrontier
                 await _channel.DeleteAsync(TelegramMessageId, ct).ConfigureAwait(false);
                 _deleted = true;
                 _channel.Forget(Id);
+                _channel.Buttons?.Release(Id);
             }
             finally
             {
