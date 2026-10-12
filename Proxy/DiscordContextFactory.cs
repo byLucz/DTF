@@ -16,7 +16,7 @@ namespace DiscordTelegramFrontier
         public static void Validate() => _ = Fields.Value;
 
         public static SocketCommandContext Create(DiscordSocketClient client, SocketGuild guild,
-            FrontierProxyChannel channel, SocketGuildUser user)
+            FrontierProxyChannel channel, SocketUser user)
         {
             var fields = Fields.Value;
             var context = (SocketCommandContext)RuntimeHelpers.GetUninitializedObject(typeof(SocketCommandContext));

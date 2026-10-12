@@ -270,9 +270,7 @@ namespace DiscordTelegramFrontier
 
             var guild = guildId != 0 ? _discord.GetGuild(guildId) : null;
 
-            SocketGuildUser user = null;
-            if (guild is not null && msg.From is { } from && _opts.UserToDiscord.TryGetValue(from.Id, out var discordId))
-                user = guild.GetUser(discordId);
+            var user = LinkedUser(guild, msg.From);
 
             var channel = new FrontierProxyChannel(bot, msg.Chat.Id, _discord.CurrentUser,
                 messageThreadId: msg.MessageThreadId, businessConnectionId: msg.BusinessConnectionId);
@@ -390,10 +388,7 @@ namespace DiscordTelegramFrontier
                 guildId = _opts.DefaultGuildId;
 
             var guild = guildId != 0 ? _discord.GetGuild(guildId) : null;
-            IUser user = guild is not null && _opts.UserToDiscord.TryGetValue(callback.From.Id, out var discordId)
-                ? guild.GetUser(discordId)
-                : null;
-            user ??= FrontierUsers.Proxy(callback.From, callback.From.Username);
+            IUser user = LinkedUser(guild, callback.From) ?? (IUser)FrontierUsers.Proxy(callback.From, callback.From.Username);
 
             var interaction = new FrontierComponentInteraction(entry.Message,
                 new FrontierComponentData(entry.CustomId, entry.Type, entry.Values), user, guild,
@@ -414,6 +409,13 @@ namespace DiscordTelegramFrontier
             if (!result.IsSuccess)
                 await FinishInteractionAsync(context, result).ConfigureAwait(false);
             return true;
+        }
+
+        private SocketUser LinkedUser(SocketGuild guild, User from)
+        {
+            if (from is null || !_opts.UserToDiscord.TryGetValue(from.Id, out var discordId))
+                return null;
+            return guild is not null ? guild.GetUser(discordId) : _discord.GetUser(discordId);
         }
 
         private Task HandleInteractionExecutedAsync(ICommandInfo command, IInteractionContext context, Discord.Interactions.IResult result)

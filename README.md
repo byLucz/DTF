@@ -102,7 +102,7 @@ Use `ProcessUpdateAsync` with an external receiver, or `EnableDiscordCommands = 
 
 - Only text/data commands that reply via `ReplyAsync` / `Context.Channel.SendMessageAsync` are portable.
 - Not supported: voice/music, reactions, modals, user/role/channel select menus, commands that cast the channel to `SocketTextChannel`.
-- Mappings are optional. Stateless commands (e.g. an API lookup) work in any chat with no mapping. Commands that read `Context.Guild` need a chat→guild map (or `DefaultGuild`); commands with permission checks (`Context.User`) need the Telegram user linked to a Discord id, otherwise `Guild`/`User` are null and such commands degrade or deny.
+- Mappings are optional. Stateless commands (e.g. an API lookup) work in any chat with no mapping. Commands that read `Context.Guild` need a chat→guild map (or `DefaultGuild`); commands with permission checks (`Context.User`) need the Telegram user linked to a Discord id, otherwise `User` is null and such commands degrade or deny. In a chat with a guild the linked user is that guild member; in a chat without one it is the cached Discord user, so DM-style checks such as "bot owner" work there.
 - Discord mentions, roles, channels and `<t:...>` timestamps in replies are not converted yet.
 
 ## Stack
