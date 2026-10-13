@@ -17,11 +17,19 @@ namespace DiscordTelegramFrontier
             => (embed == null ? Enumerable.Empty<Embed>() : new[] { embed })
                 .Concat(embeds ?? Enumerable.Empty<Embed>()).Where(e => e != null).ToArray();
 
-        internal static (string text, string image) RenderMessage(string message, IReadOnlyList<Embed> embeds)
+        internal static bool HasImage(IEnumerable<Embed> embeds)
+            => embeds.Any(e => !string.IsNullOrEmpty(e.Image?.Url ?? e.Thumbnail?.Url));
+
+        internal static (string text, string image) RenderMessage(string message, IReadOnlyList<Embed> embeds, string media = null)
         {
-            var image = embeds.Select(e => e.Image?.Url ?? e.Thumbnail?.Url)
+            var image = media ?? embeds.Select(e => e.Image?.Url ?? e.Thumbnail?.Url)
                 .FirstOrDefault(url => !string.IsNullOrEmpty(url));
             var blocks = new List<TextBlock>();
+            void Separate()
+            {
+                if (blocks.Count > 0 && blocks[^1].Runs.Count > 0)
+                    blocks.Add(new TextBlock(Array.Empty<TextRun>()));
+            }
             void Append(string value, TextStyle style = TextStyle.None, string url = null)
             {
                 if (string.IsNullOrWhiteSpace(value)) return;
@@ -38,8 +46,10 @@ namespace DiscordTelegramFrontier
             Append(message);
             foreach (var embed in embeds)
             {
+                Separate();
                 Append(embed.Author?.Name, TextStyle.Bold, embed.Author?.Url);
                 Append(embed.Title, TextStyle.Bold, embed.Url);
+                Separate();
                 Append(embed.Description);
                 foreach (var row in FieldRows(embed.Fields))
                 {
@@ -59,8 +69,15 @@ namespace DiscordTelegramFrontier
                         Append(field.Value);
                     }
                 }
-                Append(embed.Footer?.Text, TextStyle.Italic);
+                if (!string.IsNullOrWhiteSpace(embed.Footer?.Text))
+                {
+                    Separate();
+                    Append(embed.Footer?.Text, TextStyle.Italic);
+                }
             }
+
+            while (blocks.Count > 0 && blocks[^1].Runs.Count == 0)
+                blocks.RemoveAt(blocks.Count - 1);
 
             var html = RenderHtml(blocks, image == null ? 4096 : 1024);
             return (html.Length == 0 && image == null ? "(empty)" : html, image);

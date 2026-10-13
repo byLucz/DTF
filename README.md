@@ -38,6 +38,10 @@ Text mode sends the embed image as a Telegram photo, or as an animation for `.gi
 
 Image mode draws the embed image and thumbnail into the PNG (falls back to the link if the download fails), inline fields are laid out in up to 3 columns like in Discord, emoji use static frames.
 
+In text mode a Tenor, Giphy or direct `.gif`/`.mp4`/`.webm` link in the message or the first embed description is sent as a Telegram animation (when the embed has no image), and the link is removed from the caption. Tenor pages are resolved through their meta tags, results are cached in memory.
+
+Text mode separates the embed header (author and title), body and footer with blank lines.
+
 Both modes translate Discord formatting in messages and embeds: emphasis, links, code, spoilers, quotes, lists and headings. PNG spoilers stay masked and links are visual only; Telegram text uses bold headings and italic subtext.
 
 Mark a command:
@@ -103,7 +107,7 @@ Use `ProcessUpdateAsync` with an external receiver, or `EnableDiscordCommands = 
 - Only text/data commands that reply via `ReplyAsync` / `Context.Channel.SendMessageAsync` are portable.
 - Not supported: voice/music, reactions, modals, user/role/channel select menus, commands that cast the channel to `SocketTextChannel`.
 - Mappings are optional. Stateless commands (e.g. an API lookup) work in any chat with no mapping. Commands that read `Context.Guild` need a chat→guild map (or `DefaultGuild`); commands with permission checks (`Context.User`) need the Telegram user linked to a Discord id, otherwise `User` is null and such commands degrade or deny. In a chat with a guild the linked user is that guild member; in a chat without one it is the cached Discord user, so DM-style checks such as "bot owner" work there.
-- Discord mentions, roles, channels and `<t:...>` timestamps in replies are not converted yet.
+- Discord mentions become `@name`: a user linked through `UserToDiscord` shows as their Telegram `@username` (when seen in chat), others as their Discord display name; roles become `@role`, channels `#channel`, and `<t:...>` timestamps become local dates.
 
 ## Stack
 

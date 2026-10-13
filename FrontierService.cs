@@ -273,7 +273,10 @@ namespace DiscordTelegramFrontier
             var user = LinkedUser(guild, msg.From);
 
             var channel = new FrontierProxyChannel(bot, msg.Chat.Id, _discord.CurrentUser,
-                messageThreadId: msg.MessageThreadId, businessConnectionId: msg.BusinessConnectionId);
+                messageThreadId: msg.MessageThreadId, businessConnectionId: msg.BusinessConnectionId)
+            {
+                Resolver = FrontierMentions.Resolver(_discord, guild, _opts)
+            };
             var context = DiscordContextFactory.Create(_discord, guild, channel, user);
             FrontierUsers.Attach(context, msg, guild, _opts);
 

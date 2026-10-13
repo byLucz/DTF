@@ -43,6 +43,12 @@ namespace DiscordTelegramFrontier
                 Known.TryRemove(stale);
         }
 
+        public static string UsernameOf(long telegramId)
+            => Known.Values.Where(known => known.User.Id == telegramId)
+                .OrderByDescending(known => known.Seen)
+                .Select(known => known.User.Username)
+                .FirstOrDefault();
+
         public static void Attach(ICommandContext context, Message message, SocketGuild guild, FrontierOptions options)
             => States.AddOrUpdate(context, new CommandState(message, guild, options));
 

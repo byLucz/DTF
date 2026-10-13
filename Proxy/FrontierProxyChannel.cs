@@ -68,11 +68,38 @@ namespace DiscordTelegramFrontier
             return message;
         }
 
+        internal Func<string, string> Resolver { get; set; }
+
         internal async Task<TelegramRenderedMessage> RenderAsync(string content, Embed[] embeds, CancellationToken ct)
         {
+            if (Resolver != null)
+            {
+                content = Resolver(content);
+                embeds = Array.ConvertAll(embeds, embed => FrontierMentions.Rewrite(embed, Resolver));
+            }
+
             if (_renderAsImage)
                 return new TelegramRenderedMessage(null, Png: await ImageRenderer.RenderAsync(content, embeds, ct).ConfigureAwait(false));
-            var rendered = TelegramRenderer.RenderMessage(content, embeds);
+
+            string media = null;
+            if (!TelegramRenderer.HasImage(embeds))
+            {
+                (content, media) = await FrontierMedia.ExtractAsync(content, ct).ConfigureAwait(false);
+                if (media == null && embeds.Length > 0)
+                {
+                    var (description, found) = await FrontierMedia.ExtractAsync(embeds[0].Description, ct).ConfigureAwait(false);
+                    if (found != null)
+                    {
+                        var builder = embeds[0].ToEmbedBuilder();
+                        builder.Description = description;
+                        embeds = (Embed[])embeds.Clone();
+                        embeds[0] = builder.Build();
+                        media = found;
+                    }
+                }
+            }
+
+            var rendered = TelegramRenderer.RenderMessage(content, embeds, media);
             return new TelegramRenderedMessage(rendered.text, rendered.image);
         }
 
