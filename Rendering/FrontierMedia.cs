@@ -19,6 +19,8 @@ namespace DiscordTelegramFrontier
             @"<meta[^>]+(?:property|name)=""(?<key>og:video:secure_url|og:video|twitter:player:stream|og:image)""[^>]+content=""(?<url>[^""]+)""",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private static readonly Regex GiphyId = new(@"giphy\.com/gifs/(?:[^/\s]*-)?(?<id>[A-Za-z0-9]+)/?(?:[?#]|$)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex SoleEmoji = new(@"^\s*<(?<animated>a?):(?<name>\w+):(?<id>\d+)>\s*$", RegexOptions.Compiled);
+        private static readonly Regex Emoji = new(@"<a?:(?<name>\w+):\d+>", RegexOptions.Compiled);
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(5) };
         private static readonly ConcurrentDictionary<string, string> Cache = new();
 
@@ -32,6 +34,9 @@ namespace DiscordTelegramFrontier
             if (string.IsNullOrWhiteSpace(text))
                 return (text, null);
 
+            if (SoleEmoji.Match(text) is { Success: true } emoji)
+                return ("", $"https://cdn.discordapp.com/emojis/{emoji.Groups["id"].Value}.{(emoji.Groups["animated"].Length > 0 ? "gif" : "png")}");
+
             var match = Link.Match(text);
             if (!match.Success)
                 return (text, null);
@@ -43,6 +48,11 @@ namespace DiscordTelegramFrontier
             var stripped = (text.Substring(0, match.Index) + text.Substring(match.Index + match.Length)).Trim();
             return (stripped, media);
         }
+
+        public static string EmojiText(string text)
+            => string.IsNullOrEmpty(text) || text.IndexOf('<') < 0
+                ? text
+                : Emoji.Replace(text, match => ":" + match.Groups["name"].Value.Replace("_", "\\_") + ":");
 
         private static async Task<string> ResolveAsync(string url, CancellationToken cancellationToken)
         {

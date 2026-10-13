@@ -99,6 +99,8 @@ namespace DiscordTelegramFrontier
                 }
             }
 
+            content = FrontierMedia.EmojiText(content);
+            embeds = Array.ConvertAll(embeds, embed => FrontierMentions.Rewrite(embed, FrontierMedia.EmojiText));
             var rendered = TelegramRenderer.RenderMessage(content, embeds, media);
             return new TelegramRenderedMessage(rendered.text, rendered.image);
         }

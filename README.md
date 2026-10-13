@@ -34,7 +34,7 @@ In groups commands are accepted only with `/` (`/weather London`); in private ch
 
 `[Frontier]` sends text; `[FrontierAsImage]` sends PNG with cached Discord emoji and works on its own. `ModifyAsync` updates the same message. Linux needs fontconfig and suitable fonts for image mode.
 
-Text mode sends the embed image as a Telegram photo, or as an animation for `.gif`/`.mp4`/`.webm`; if Telegram cannot fetch it, the link is appended to the text. Custom Discord emoji are dropped, short inline fields are joined into one line.
+Text mode sends the embed image as a Telegram photo, or as an animation for `.gif`/`.mp4`/`.webm`; if Telegram cannot fetch it, the link is appended to the text. Custom Discord emoji become `:name:`; a message that is only one custom emoji is sent as that emoji image (animated ones as GIF). Short inline fields are joined into one line.
 
 Image mode draws the embed image and thumbnail into the PNG (falls back to the link if the download fails), inline fields are laid out in up to 3 columns like in Discord, emoji use static frames.
 
