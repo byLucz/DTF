@@ -57,7 +57,8 @@ namespace DiscordTelegramFrontier
                 if (_tg != null || string.IsNullOrWhiteSpace(_opts.TelegramToken))
                     return _tg;
                 lock (_stopLock)
-                    return _tg ??= new TelegramBotClient(new TelegramBotClientOptions(_opts.TelegramToken) { RetryCount = _opts.RetryCount });
+                    return _tg ??= new TelegramBotClient(new TelegramBotClientOptions(_opts.TelegramToken) { RetryCount = _opts.RetryCount },
+                        FrontierHttp.Create(TimeSpan.FromSeconds(PollingTimeoutSeconds + 30)));
             }
         }
 
@@ -205,6 +206,10 @@ namespace DiscordTelegramFrontier
                 return await _pipeline.InvokeAsync(context).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex) when (FrontierCallbacks.IsStale(ex))
+            {
+                return true;
+            }
             catch (Exception ex)
             {
                 ReportError(ex);
@@ -382,8 +387,8 @@ namespace DiscordTelegramFrontier
             if (!_buttons.TryGet(data, out var entry) || callback.Message is not { } source
                 || entry.Message.ProxyChannel.ChatId != source.Chat.Id || !entry.Message.ProxyChannel.UsesClient(bot))
             {
-                await bot.AnswerCallbackQuery(callback.Id, data == FrontierButtons.Prefix ? null : "Кнопка устарела, вызови команду заново.",
-                    cancellationToken: ct).ConfigureAwait(false);
+                await FrontierCallbacks.AnswerAsync(bot, callback.Id, data == FrontierButtons.Prefix ? null : "Кнопка устарела, вызови команду заново.",
+                    false, ct).ConfigureAwait(false);
                 return true;
             }
 
@@ -396,7 +401,7 @@ namespace DiscordTelegramFrontier
             var interaction = new FrontierComponentInteraction(entry.Message,
                 new FrontierComponentData(entry.CustomId, entry.Type, entry.Values), user, guild,
                 _discord.CurrentUser?.Id ?? 0, callback.From.LanguageCode,
-                (text, alert) => bot.AnswerCallbackQuery(callback.Id, text, alert, cancellationToken: ct));
+                (text, alert) => FrontierCallbacks.AnswerAsync(bot, callback.Id, text, alert, ct));
             var context = new FrontierInteractionContext(_discord, guild, entry.Message.ProxyChannel, user, interaction);
 
             Discord.Interactions.IResult result;
@@ -429,6 +434,9 @@ namespace DiscordTelegramFrontier
             if (!context.TryFinish())
                 return;
 
+            if (result is Discord.Interactions.ExecuteResult { Exception: { } stale } && FrontierCallbacks.IsStale(stale))
+                return;
+
             var userError = result.Error is InteractionCommandError.UnknownCommand or InteractionCommandError.UnmetPrecondition
                 or InteractionCommandError.ConvertFailed or InteractionCommandError.BadArgs or InteractionCommandError.ParseFailed;
             if (!result.IsSuccess && !userError)
@@ -447,7 +455,8 @@ namespace DiscordTelegramFrontier
                         _ => "Не удалось выполнить действие."
                     }, alert: true).ConfigureAwait(false);
             }
-            catch (Exception ex) { ReportError(ex); }
+            catch (Exception ex) when (!FrontierCallbacks.IsStale(ex)) { ReportError(ex); }
+            catch (Exception) { }
         }
 
         private async Task ReportFailureAsync(ICommandContext context, Discord.Commands.IResult result, Optional<CommandInfo> command = default)

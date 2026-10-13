@@ -61,7 +61,7 @@ namespace DiscordTelegramFrontier
         public Task AnswerCallbackAsync(string text = null, bool showAlert = false)
         {
             var callback = CallbackQuery ?? throw new InvalidOperationException("This update has no callback query.");
-            return Bot.AnswerCallbackQuery(callback.Id, text: text, showAlert: showAlert, cancellationToken: CancellationToken);
+            return FrontierCallbacks.AnswerAsync(Bot, callback.Id, text, showAlert, CancellationToken);
         }
 
         public IMessageChannel CreateReplyChannel(bool renderAsImage = false)

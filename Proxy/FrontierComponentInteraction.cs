@@ -32,13 +32,14 @@ namespace DiscordTelegramFrontier
     public sealed class FrontierComponentInteraction : IComponentInteraction
     {
         private readonly FrontierProxyMessage _message;
-        private readonly Func<string, bool, Task> _answer;
+        private readonly Func<string, bool, Task<bool>> _answer;
         private readonly SemaphoreSlim _gate = new(1, 1);
         private FrontierProxyMessage _response;
         private bool _answered;
+        private bool _stale;
 
         internal FrontierComponentInteraction(FrontierProxyMessage message, FrontierComponentData data, IUser user,
-            IGuild guild, ulong applicationId, string locale, Func<string, bool, Task> answer)
+            IGuild guild, ulong applicationId, string locale, Func<string, bool, Task<bool>> answer)
         {
             _message = message;
             _answer = answer;
@@ -81,7 +82,11 @@ namespace DiscordTelegramFrontier
             {
                 if (_answered) return;
                 _answered = true;
-                await _answer(text, alert).ConfigureAwait(false);
+                if (!await _answer(text, alert).ConfigureAwait(false))
+                {
+                    _stale = true;
+                    throw new FrontierStaleCallbackException(null);
+                }
             }
             finally
             {
@@ -121,6 +126,7 @@ namespace DiscordTelegramFrontier
             AllowedMentions allowedMentions = null, MessageComponent components = null, Embed embed = null,
             RequestOptions options = null, PollProperties poll = null, MessageFlags flags = MessageFlags.None)
         {
+            if (_stale) return null;
             await AnswerAsync().ConfigureAwait(false);
             return await SendAsync(text, embeds, embed, components, options).ConfigureAwait(false);
         }
@@ -130,6 +136,7 @@ namespace DiscordTelegramFrontier
 
         public async Task<IUserMessage> ModifyOriginalResponseAsync(Action<MessageProperties> func, RequestOptions options = null)
         {
+            if (_stale) return _response ?? _message;
             var target = _response ?? _message;
             await target.ModifyAsync(func, options).ConfigureAwait(false);
             return target;
@@ -167,6 +174,8 @@ namespace DiscordTelegramFrontier
 
         private void EnsureNotResponded()
         {
+            if (_stale)
+                throw new FrontierStaleCallbackException(null);
             if (HasResponded)
                 throw new InvalidOperationException("Cannot respond twice to the same interaction.");
         }
