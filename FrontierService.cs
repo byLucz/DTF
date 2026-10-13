@@ -291,12 +291,12 @@ namespace DiscordTelegramFrontier
             var validation = await _commands.ValidateAndGetBestMatch(matches, context, _services).ConfigureAwait(false);
             if (validation is not MatchResult selection || !selection.IsSuccess || !selection.Match.HasValue)
             {
-                await ReportFailureAsync(context, validation).ConfigureAwait(false);
+                await ReportFailureAsync(context, validation, (validation as MatchResult)?.Match?.Command ?? matches.Commands[0].Command).ConfigureAwait(false);
                 return true;
             }
             if (selection.Pipeline is not Discord.Commands.ParseResult parsed || !parsed.IsSuccess)
             {
-                await ReportFailureAsync(context, selection.Pipeline).ConfigureAwait(false);
+                await ReportFailureAsync(context, selection.Pipeline, selection.Match.Value.Command).ConfigureAwait(false);
                 return true;
             }
 
@@ -305,7 +305,7 @@ namespace DiscordTelegramFrontier
             if (ButtonsAvailable && command.Attributes.Any(a => a is FrontierAttribute { Buttons: true } or FrontierAsImageAttribute { Buttons: true }))
                 channel.EnableButtons(_buttons);
             var result = await command.ExecuteAsync(context, parsed, _services).ConfigureAwait(false);
-            await ReportFailureAsync(context, result).ConfigureAwait(false);
+            await ReportFailureAsync(context, result, command).ConfigureAwait(false);
             return true;
         }
 
@@ -368,7 +368,7 @@ namespace DiscordTelegramFrontier
         }
 
         private Task HandleCommandExecutedAsync(Optional<CommandInfo> command, ICommandContext context, Discord.Commands.IResult result)
-            => ReportFailureAsync(context, result);
+            => ReportFailureAsync(context, result, command);
 
         private async Task<bool> ExecuteDiscordComponentAsync(FrontierUpdateContext telegram)
         {
@@ -450,7 +450,7 @@ namespace DiscordTelegramFrontier
             catch (Exception ex) { ReportError(ex); }
         }
 
-        private async Task ReportFailureAsync(ICommandContext context, Discord.Commands.IResult result)
+        private async Task ReportFailureAsync(ICommandContext context, Discord.Commands.IResult result, Optional<CommandInfo> command = default)
         {
             if (result.IsSuccess || context.Channel is not FrontierProxyChannel channel || !_failures.TryGetValue(context, out var failure))
                 return;
@@ -465,7 +465,10 @@ namespace DiscordTelegramFrontier
             var reply = userError ? result.ErrorReason : "Не удалось выполнить команду.";
             try
             {
-                await ((IMessageChannel)channel).SendMessageAsync(reply).ConfigureAwait(false);
+                if (_opts.CommandErrorHandler != null)
+                    await _opts.CommandErrorHandler(command, context, result).ConfigureAwait(false);
+                else
+                    await ((IMessageChannel)channel).SendMessageAsync(reply).ConfigureAwait(false);
             }
             catch (Exception ex) { ReportError(ex); }
         }

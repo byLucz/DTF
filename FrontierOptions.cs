@@ -17,6 +17,7 @@ namespace DiscordTelegramFrontier
         public Action<Exception> ErrorHandler { get; set; }
         public Func<ITelegramBotClient, Update, string, CancellationToken, Task<bool>> UpdateHandler { get; set; }
         public Func<FrontierUpdateContext, Exception, Task> UpdateErrorHandler { get; set; }
+        public Func<Discord.Optional<Discord.Commands.CommandInfo>, Discord.Commands.ICommandContext, Discord.Commands.IResult, Task> CommandErrorHandler { get; set; }
         public UpdateType[] AllowedUpdates { get; set; } = new[] { UpdateType.Message };
         public TimeSpan ButtonLifetime { get; set; } = TimeSpan.FromHours(1);
         public ushort RetryCount { get; set; } = 3;
