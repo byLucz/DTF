@@ -61,7 +61,7 @@ namespace DiscordTelegramFrontier
                 }
                 if (DiscordMarkdown.IsLink(embed.Image?.Url)) blocks.Add(new Block(null, 0, accent, Picture: embed.Image.Value.Url));
                 else if (DiscordMarkdown.IsLink(embed.Thumbnail?.Url)) blocks.Add(new Block(null, 0, accent, Picture: embed.Thumbnail.Value.Url, Thumbnail: true));
-                Add(embed.Footer?.Text, 22, new SKColor(151, 168, 185), icon: embed.Footer?.IconUrl);
+                Add(TelegramRenderer.FooterLine(embed), 22, new SKColor(151, 168, 185), icon: embed.Footer?.IconUrl);
 
             }
             if (!blocks.Any(b => b.Content != null || b.Columns != null)) Add("(empty)", 30, SKColors.White);

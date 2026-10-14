@@ -69,10 +69,10 @@ namespace DiscordTelegramFrontier
                         Append(field.Value);
                     }
                 }
-                if (!string.IsNullOrWhiteSpace(embed.Footer?.Text))
+                if (FooterLine(embed) is { } footer)
                 {
                     Separate();
-                    Append(embed.Footer?.Text, TextStyle.Italic);
+                    Append(footer, TextStyle.Italic);
                 }
             }
 
@@ -81,6 +81,17 @@ namespace DiscordTelegramFrontier
 
             var html = RenderHtml(blocks, image == null ? 4096 : 1024);
             return (html.Length == 0 && image == null ? "(empty)" : html, image);
+        }
+
+        internal static string FooterLine(Embed embed)
+        {
+            var parts = new[]
+            {
+                embed.Footer?.Text?.Trim(),
+                embed.Timestamp?.ToLocalTime().ToString("dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture)
+            }.Where(part => !string.IsNullOrWhiteSpace(part)).ToArray();
+
+            return parts.Length == 0 ? null : string.Join(" / ", parts);
         }
 
         internal static IEnumerable<EmbedField[]> FieldRows(IEnumerable<EmbedField> fields)
