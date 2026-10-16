@@ -249,7 +249,7 @@ namespace DiscordTelegramFrontier
             var bot = telegram.Bot;
             var update = telegram.Update;
             var msg = update.Message;
-            if (msg?.Text is not string raw)
+            if ((msg?.Text ?? msg?.Caption) is not string raw)
                 return false;
 
             var text = raw.TrimStart();
@@ -280,7 +280,8 @@ namespace DiscordTelegramFrontier
             var channel = new FrontierProxyChannel(bot, msg.Chat.Id, _discord.CurrentUser,
                 messageThreadId: msg.MessageThreadId, businessConnectionId: msg.BusinessConnectionId)
             {
-                Resolver = FrontierMentions.Resolver(_discord, guild, _opts)
+                Resolver = FrontierMentions.Resolver(_discord, guild, _opts),
+                Source = msg
             };
             var context = DiscordContextFactory.Create(_discord, guild, channel, user);
             FrontierUsers.Attach(context, msg, guild, _opts);

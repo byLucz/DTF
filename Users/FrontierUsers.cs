@@ -61,9 +61,9 @@ namespace DiscordTelegramFrontier
             name = input.Trim();
 
             var message = state.Message;
-            var text = message.Text ?? string.Empty;
+            var text = message.Text ?? message.Caption ?? string.Empty;
 
-            foreach (var entity in message.Entities ?? Array.Empty<MessageEntity>())
+            foreach (var entity in (message.Text != null ? message.Entities : message.CaptionEntities) ?? Array.Empty<MessageEntity>())
             {
                 if (entity.Type is not (MessageEntityType.Mention or MessageEntityType.TextMention))
                     continue;

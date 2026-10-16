@@ -5,6 +5,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Telegram.Bot;
@@ -46,8 +47,39 @@ namespace DiscordTelegramFrontier
         internal InlineKeyboardMarkup BuildMarkup(FrontierProxyMessage message, MessageComponent components)
             => Buttons?.Build(message, components);
 
+        private sealed record Upload(string Name, byte[] Data);
+
+        internal Message Source { get; init; }
+
+        internal async Task<byte[]> DownloadImageAsync(int maxBytes, CancellationToken ct = default)
+        {
+            foreach (var message in new[] { Source, Source?.ReplyToMessage })
+            {
+                var fileId = message?.Photo is { Length: > 0 } photos
+                    ? photos.Where(photo => photo.FileSize is null || photo.FileSize <= maxBytes).MaxBy(photo => photo.Width * photo.Height)?.FileId
+                    : message?.Document is { MimeType: { } mime } document && mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+                        && (document.FileSize is null || document.FileSize <= maxBytes) ? document.FileId
+                    : null;
+                if (fileId == null)
+                    continue;
+
+                using var buffer = new MemoryStream();
+                await _tg.GetInfoAndDownloadFile(fileId, buffer, ct).ConfigureAwait(false);
+                return buffer.Length <= maxBytes ? buffer.ToArray() : null;
+            }
+            return null;
+        }
+
+        private async Task<FrontierProxyMessage> SendFileCoreAsync(Stream stream, string name, string text, Embed embed, Embed[] embeds,
+            MessageComponent components, RequestOptions options)
+        {
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer, options?.CancelToken ?? default).ConfigureAwait(false);
+            return await SendCoreAsync(text, embed, embeds, components, options, new Upload(Path.GetFileName(name), buffer.ToArray())).ConfigureAwait(false);
+        }
+
         private async Task<FrontierProxyMessage> SendCoreAsync(string text, Embed embed, Embed[] embeds, MessageComponent components,
-            RequestOptions options)
+            RequestOptions options, Upload upload = null)
         {
             var allEmbeds = TelegramRenderer.CombineEmbeds(embed, embeds);
             var ct = options?.CancelToken ?? default;
@@ -55,8 +87,8 @@ namespace DiscordTelegramFrontier
             var markup = BuildMarkup(message, components);
             try
             {
-                var rendered = await RenderAsync(text, allEmbeds, ct).ConfigureAwait(false);
-                var sent = await SendRenderedAsync(rendered, markup, ct).ConfigureAwait(false);
+                var rendered = await RenderAsync(text, allEmbeds, ct, upload?.Name).ConfigureAwait(false);
+                var sent = await SendRenderedAsync(rendered, markup, ct, upload).ConfigureAwait(false);
                 message.Bind(sent.Id, rendered, components, markup);
             }
             catch
@@ -70,7 +102,7 @@ namespace DiscordTelegramFrontier
 
         internal Func<string, string> Resolver { get; set; }
 
-        internal async Task<TelegramRenderedMessage> RenderAsync(string content, Embed[] embeds, CancellationToken ct)
+        internal async Task<TelegramRenderedMessage> RenderAsync(string content, Embed[] embeds, CancellationToken ct, string upload = null)
         {
             if (Resolver != null)
             {
@@ -78,11 +110,11 @@ namespace DiscordTelegramFrontier
                 embeds = Array.ConvertAll(embeds, embed => FrontierMentions.Rewrite(embed, Resolver));
             }
 
-            if (_renderAsImage)
+            if (_renderAsImage && upload == null)
                 return new TelegramRenderedMessage(null, Png: await ImageRenderer.RenderAsync(content, embeds, ct).ConfigureAwait(false));
 
-            string media = null;
-            if (!TelegramRenderer.HasImage(embeds))
+            string media = upload == null || TelegramRenderer.HasImage(embeds) ? null : "attachment://" + upload;
+            if (upload == null && !TelegramRenderer.HasImage(embeds))
             {
                 (content, media) = await FrontierMedia.ExtractAsync(content, ct).ConfigureAwait(false);
                 if (media == null && embeds.Length > 0)
@@ -105,8 +137,23 @@ namespace DiscordTelegramFrontier
             return new TelegramRenderedMessage(rendered.text, rendered.image);
         }
 
-        private async Task<Message> SendRenderedAsync(TelegramRenderedMessage rendered, InlineKeyboardMarkup markup, CancellationToken ct)
+        private async Task<Message> SendRenderedAsync(TelegramRenderedMessage rendered, InlineKeyboardMarkup markup, CancellationToken ct,
+            Upload upload = null)
         {
+            if (upload != null)
+            {
+                using var stream = new MemoryStream(upload.Data, false);
+                var file = InputFile.FromStream(stream, upload.Name);
+                var caption = rendered.Text == "(empty)" ? null : rendered.Text;
+                return IsAnimation(upload.Name)
+                    ? await _tg.SendAnimation(_chatId, file, caption: caption, parseMode: ParseMode.Html, replyMarkup: markup,
+                        messageThreadId: _messageThreadId, businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false)
+                    : IsPhoto(upload.Name)
+                        ? await _tg.SendPhoto(_chatId, file, caption: caption, parseMode: ParseMode.Html, replyMarkup: markup,
+                            messageThreadId: _messageThreadId, businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false)
+                        : await _tg.SendDocument(_chatId, file, caption: caption, parseMode: ParseMode.Html, replyMarkup: markup,
+                            messageThreadId: _messageThreadId, businessConnectionId: _businessConnectionId, cancellationToken: ct).ConfigureAwait(false);
+            }
             if (rendered.Png != null)
             {
                 using var stream = new MemoryStream(rendered.Png, false);
@@ -142,14 +189,15 @@ namespace DiscordTelegramFrontier
                 businessConnectionId: _businessConnectionId, cancellationToken: ct);
 
         private static bool IsAnimation(string url)
-        {
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-                return false;
+            => HasExtension(url, ".gif", ".mp4", ".webm");
 
-            var path = uri.AbsolutePath;
-            return path.EndsWith(".gif", StringComparison.OrdinalIgnoreCase)
-                || path.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)
-                || path.EndsWith(".webm", StringComparison.OrdinalIgnoreCase);
+        private static bool IsPhoto(string url)
+            => HasExtension(url, ".png", ".jpg", ".jpeg", ".webp");
+
+        private static bool HasExtension(string url, params string[] extensions)
+        {
+            var path = Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" ? uri.AbsolutePath : url ?? "";
+            return extensions.Any(extension => path.EndsWith(extension, StringComparison.OrdinalIgnoreCase));
         }
 
         internal async Task<int> EditAsync(int messageId, TelegramRenderedMessage previous, TelegramRenderedMessage next,
@@ -243,14 +291,24 @@ namespace DiscordTelegramFrontier
             return null;
         }
 
-        public Task<RestUserMessage> SendFileAsync(string filePath, string text, bool isTTS = false, Embed embed = null, RequestOptions options = null, bool isSpoiler = false, AllowedMentions allowedMentions = null, MessageReference messageReference = null, MessageComponent components = null, ISticker[] stickers = null, Embed[] embeds = null, MessageFlags flags = MessageFlags.None, PollProperties poll = null)
-            => throw new NotSupportedException();
+        public async Task<RestUserMessage> SendFileAsync(string filePath, string text, bool isTTS = false, Embed embed = null, RequestOptions options = null, bool isSpoiler = false, AllowedMentions allowedMentions = null, MessageReference messageReference = null, MessageComponent components = null, ISticker[] stickers = null, Embed[] embeds = null, MessageFlags flags = MessageFlags.None, PollProperties poll = null)
+        {
+            await using var stream = File.OpenRead(filePath);
+            await SendFileCoreAsync(stream, filePath, text, embed, embeds, components, options).ConfigureAwait(false);
+            return null;
+        }
 
-        public Task<RestUserMessage> SendFileAsync(Stream stream, string filename, string text, bool isTTS = false, Embed embed = null, RequestOptions options = null, bool isSpoiler = false, AllowedMentions allowedMentions = null, MessageReference messageReference = null, MessageComponent components = null, ISticker[] stickers = null, Embed[] embeds = null, MessageFlags flags = MessageFlags.None, PollProperties poll = null)
-            => throw new NotSupportedException();
+        public async Task<RestUserMessage> SendFileAsync(Stream stream, string filename, string text, bool isTTS = false, Embed embed = null, RequestOptions options = null, bool isSpoiler = false, AllowedMentions allowedMentions = null, MessageReference messageReference = null, MessageComponent components = null, ISticker[] stickers = null, Embed[] embeds = null, MessageFlags flags = MessageFlags.None, PollProperties poll = null)
+        {
+            await SendFileCoreAsync(stream, filename, text, embed, embeds, components, options).ConfigureAwait(false);
+            return null;
+        }
 
-        public Task<RestUserMessage> SendFileAsync(FileAttachment attachment, string text, bool isTTS = false, Embed embed = null, RequestOptions options = null, AllowedMentions allowedMentions = null, MessageReference messageReference = null, MessageComponent components = null, ISticker[] stickers = null, Embed[] embeds = null, MessageFlags flags = MessageFlags.None, PollProperties poll = null)
-            => throw new NotSupportedException();
+        public async Task<RestUserMessage> SendFileAsync(FileAttachment attachment, string text, bool isTTS = false, Embed embed = null, RequestOptions options = null, AllowedMentions allowedMentions = null, MessageReference messageReference = null, MessageComponent components = null, ISticker[] stickers = null, Embed[] embeds = null, MessageFlags flags = MessageFlags.None, PollProperties poll = null)
+        {
+            await SendFileCoreAsync(attachment.Stream, attachment.FileName, text, embed, embeds, components, options).ConfigureAwait(false);
+            return null;
+        }
 
         public Task<RestUserMessage> SendFilesAsync(IEnumerable<FileAttachment> attachments, string text, bool isTTS = false, Embed embed = null, RequestOptions options = null, AllowedMentions allowedMentions = null, MessageReference messageReference = null, MessageComponent components = null, ISticker[] stickers = null, Embed[] embeds = null, MessageFlags flags = MessageFlags.None, PollProperties poll = null)
             => throw new NotSupportedException();
@@ -311,12 +369,15 @@ namespace DiscordTelegramFrontier
             return await SendCoreAsync(text, embed, embeds, components, options).ConfigureAwait(false);
         }
 
-        Task<IUserMessage> IMessageChannel.SendFileAsync(string filePath, string text, bool isTTS, Embed embed, RequestOptions options, bool isSpoiler, AllowedMentions allowedMentions, MessageReference messageReference, MessageComponent components, ISticker[] stickers, Embed[] embeds, MessageFlags flags, PollProperties poll)
-            => throw new NotSupportedException();
-        Task<IUserMessage> IMessageChannel.SendFileAsync(Stream stream, string filename, string text, bool isTTS, Embed embed, RequestOptions options, bool isSpoiler, AllowedMentions allowedMentions, MessageReference messageReference, MessageComponent components, ISticker[] stickers, Embed[] embeds, MessageFlags flags, PollProperties poll)
-            => throw new NotSupportedException();
-        Task<IUserMessage> IMessageChannel.SendFileAsync(FileAttachment attachment, string text, bool isTTS, Embed embed, RequestOptions options, AllowedMentions allowedMentions, MessageReference messageReference, MessageComponent components, ISticker[] stickers, Embed[] embeds, MessageFlags flags, PollProperties poll)
-            => throw new NotSupportedException();
+        async Task<IUserMessage> IMessageChannel.SendFileAsync(string filePath, string text, bool isTTS, Embed embed, RequestOptions options, bool isSpoiler, AllowedMentions allowedMentions, MessageReference messageReference, MessageComponent components, ISticker[] stickers, Embed[] embeds, MessageFlags flags, PollProperties poll)
+        {
+            await using var stream = File.OpenRead(filePath);
+            return await SendFileCoreAsync(stream, filePath, text, embed, embeds, components, options).ConfigureAwait(false);
+        }
+        async Task<IUserMessage> IMessageChannel.SendFileAsync(Stream stream, string filename, string text, bool isTTS, Embed embed, RequestOptions options, bool isSpoiler, AllowedMentions allowedMentions, MessageReference messageReference, MessageComponent components, ISticker[] stickers, Embed[] embeds, MessageFlags flags, PollProperties poll)
+            => await SendFileCoreAsync(stream, filename, text, embed, embeds, components, options).ConfigureAwait(false);
+        async Task<IUserMessage> IMessageChannel.SendFileAsync(FileAttachment attachment, string text, bool isTTS, Embed embed, RequestOptions options, AllowedMentions allowedMentions, MessageReference messageReference, MessageComponent components, ISticker[] stickers, Embed[] embeds, MessageFlags flags, PollProperties poll)
+            => await SendFileCoreAsync(attachment.Stream, attachment.FileName, text, embed, embeds, components, options).ConfigureAwait(false);
         Task<IUserMessage> IMessageChannel.SendFilesAsync(IEnumerable<FileAttachment> attachments, string text, bool isTTS, Embed embed, RequestOptions options, AllowedMentions allowedMentions, MessageReference messageReference, MessageComponent components, ISticker[] stickers, Embed[] embeds, MessageFlags flags, PollProperties poll)
             => throw new NotSupportedException();
         Task<IReadOnlyCollection<IMessage>> IMessageChannel.GetPinnedMessagesAsync(RequestOptions options)

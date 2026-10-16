@@ -1,5 +1,7 @@
 using Discord;
 using Discord.Commands;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace DiscordTelegramFrontier
 {
@@ -14,5 +16,10 @@ namespace DiscordTelegramFrontier
                 ? FrontierUsers.Sender(state)
                 : null;
         }
+
+        public static Task<byte[]> IncomingImageAsync(this ICommandContext context, int maxBytes, CancellationToken cancellationToken = default)
+            => context?.Channel is FrontierProxyChannel channel
+                ? channel.DownloadImageAsync(maxBytes, cancellationToken)
+                : Task.FromResult<byte[]>(null);
     }
 }
