@@ -104,8 +104,9 @@ Use `ProcessUpdateAsync` with an external receiver, or `EnableDiscordCommands = 
 
 ## Limitations (MVP)
 
-- Only text/data commands that reply via `ReplyAsync` / `Context.Channel.SendMessageAsync` are portable.
-- Not supported: voice/music, reactions, modals, user/role/channel select menus, commands that cast the channel to `SocketTextChannel`.
+- Commands that reply via `ReplyAsync` / `Context.Channel.SendMessageAsync` / `SendFileAsync` are portable. A sent file goes out as a Telegram photo (`.png/.jpg/.webp`), animation (`.gif/.mp4/.webm`) or document, with the embed rendered as the caption; `attachment://` embed images use the sent file.
+- `Context.Message` is `null` in Telegram. A command can read an incoming picture with `Context.IncomingImageAsync(maxBytes)` (null outside Telegram): the photo (or image document) of the command message, otherwise of the replied message. Commands are also accepted from photo captions.
+- Not supported: voice/music, reactions, modals, user/role/channel select menus, multiple files in one message, commands that cast the channel to `SocketTextChannel`.
 - Mappings are optional. Stateless commands (e.g. an API lookup) work in any chat with no mapping. Commands that read `Context.Guild` need a chat→guild map (or `DefaultGuild`); commands with permission checks (`Context.User`) need the Telegram user linked to a Discord id, otherwise `User` is null and such commands degrade or deny. In a chat with a guild the linked user is that guild member; in a chat without one it is the cached Discord user, so DM-style checks such as "bot owner" work there.
 - Discord mentions become `@name`: a user linked through `UserToDiscord` shows as their Telegram `@username` (when seen in chat), others as their Discord display name; roles become `@role`, channels `#channel`, and `<t:...>` timestamps become local dates.
 
