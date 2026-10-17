@@ -88,7 +88,7 @@ Proxy messages get process-unique IDs with the top bit set, so they never collid
 
 ## Users
 
-`IUser` parameters accept only Telegram mentions in Telegram (`@username` or a mention of a user without username); anything else fails with a readable reason. A linked Telegram user resolves to the Discord user, otherwise to `FrontierUser` with the Telegram name. Usernames are matched against recently seen chat members.
+`IUser` parameters accept only Telegram mentions in Telegram (`@username` or a mention of a user without username); anything else fails with a readable reason. A linked Telegram user resolves to the Discord user, otherwise to `FrontierUser` with the Telegram name. Usernames are matched against recently seen chat members. Modules can look them up with `FrontierUpdateContext.FindUser("@username")`.
 
 `Context.User` stays `null` for unlinked senders, use `Context.Sender()` to get the author on both platforms.
 

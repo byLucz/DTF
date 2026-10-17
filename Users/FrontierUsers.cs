@@ -43,6 +43,9 @@ namespace DiscordTelegramFrontier
                 Known.TryRemove(stale);
         }
 
+        public static User Find(string username)
+            => Known.TryGetValue(username.TrimStart('@'), out var known) ? known.User : null;
+
         public static string UsernameOf(long telegramId)
             => Known.Values.Where(known => known.User.Id == telegramId)
                 .OrderByDescending(known => known.Seen)

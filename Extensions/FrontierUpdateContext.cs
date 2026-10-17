@@ -26,6 +26,8 @@ namespace DiscordTelegramFrontier
         public string Arguments { get; } = "";
         public bool AddressedToAnotherBot { get; }
 
+        public User FindUser(string username) => FrontierUsers.Find(username);
+
         public FrontierUpdateContext(ITelegramBotClient bot, Update update, string botUsername,
             IServiceProvider services, CancellationToken cancellationToken = default)
         {
